@@ -28,6 +28,7 @@ image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")
 )
+print(os.getenv("PINECONE_API_KEY"))
 
 # Get environment variables
 pinecone_api_key = os.environ.get("PINECONE_API_KEY")
