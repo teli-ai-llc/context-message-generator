@@ -6,8 +6,7 @@ from pinecone import ServerlessSpec
 import time
 from functools import wraps
 import dotenv
-# import modal.exception
-from modal import Image, App, Secret, asgi_app, Function
+from modal import Image, App, Secret, asgi_app
 from openai import AsyncOpenAI, RateLimitError, OpenAIError
 
 # Unstructured API imports
@@ -23,41 +22,30 @@ from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 
 app = Flask(__name__)
 
-# Create an image with the required dependencies
+# Create a Modal App and Image with the required dependencies
+modal_app = App("teli-context-message-generator")
 image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")
-)
-
-modal_app = App(
-    "teli-context-message-generator",
-    image=image,
-    secrets=[
-        Secret.from_name("PINECONE_API_KEY"),
-        Secret.from_name("PINECONE_INDEX_NAME"),
-        Secret.from_name("OPENAI_API_KEY"),
-        Secret.from_name("UNSTRUCTURED_API_KEY"),
-        Secret.from_name("UNSTRUCTURED_API_URL"),
-        Secret.from_name("LOCAL_FILE_INPUT_DIR"),
-        Secret.from_name("LOCAL_FILE_OUTPUT_DIR")
-    ]
 )
 
 # Get environment variables
 pinecone_api_key = os.environ.get("PINECONE_API_KEY")
 pinecone_index_name = os.environ.get("PINECONE_INDEX_NAME")
 openai_api_key = os.environ.get("OPENAI_API_KEY")
+# print(pinecone_api_key, pinecone_index_name, openai_api_key)
 
 # Unstructured API environment variables
 unstructured_api_key = os.environ.get("UNSTRUCTURED_API_KEY")
 unstructured_api_url = os.environ.get("UNSTRUCTURED_API_URL")
 local_file_input_dir = os.environ.get("LOCAL_FILE_INPUT_DIR")
 local_file_output_dir = os.environ.get("LOCAL_FILE_OUTPUT_DIR")
+# print(unstructured_api_key, unstructured_api_url, local_file_input_dir, local_file_output_dir)
 
 # Set the base directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_DIR = BASE_DIR + local_file_input_dir
-OUTPUT_DIR = BASE_DIR + local_file_output_dir
+INPUT_DIR = os.path.join(BASE_DIR, local_file_input_dir)
+OUTPUT_DIR = os.path.join(BASE_DIR, local_file_output_dir)
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
 
 # Ensure input and output directories exist
@@ -125,6 +113,7 @@ def check_file_availability(file, context, endpoint):
     return arr
 
 @app.route('/ingest-teli-data', methods=['POST'])
+# @require_api_key
 def ingest_teli_data():
     try:
         if "unique_id" not in request.form and ("file" not in request.files or "context" not in request.files):
@@ -238,13 +227,14 @@ async def get_gpt_response(value, res=None):
         )
         return response.choices[0].message.content
     except RateLimitError as e:
-        return jsonify({"error": "Rate limit exceeded: " + str(e)}), 429
+        return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
     except OpenAIError as e:
-        return jsonify({"error": "OpenAI API error: " + str(e)}), 500
+        return jsonify({"openai error": "OpenAI API error: " + str(e)}), 500
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"openai error": str(e)}), 400
 
 @app.route('/message-teli-data', methods=['POST'])
+# @require_api_key
 async def message_teli_data():
     try:
         # Grab data from the request body
@@ -304,6 +294,7 @@ async def message_teli_data():
         return jsonify({"error": str(e)}), 400
 
 @app.route('/delete-namespace', methods=['DELETE'])
+# @require_api_key
 def delete_namespace():
     try:
         # Grab data from the request body
@@ -330,10 +321,15 @@ def delete_namespace():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@modal_app.function()
+# Modal Deployment Functions
+@modal_app.function(
+        image=image,
+        secrets=[Secret.from_name("context-messenger-secrets")]
+)
 @asgi_app()
 def flask_app():
     return app
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+@modal_app.local_entrypoint()
+def serve():
+    flask_app.serve()
