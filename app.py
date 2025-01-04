@@ -1,13 +1,13 @@
 import os, json
+from config import Config
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
-from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone import ServerlessSpec
 import time
 from functools import wraps
 import dotenv
 from modal import Image, App, Secret, asgi_app
-from openai import AsyncOpenAI, RateLimitError, OpenAIError
+from openai import RateLimitError, OpenAIError
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -28,53 +28,11 @@ image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")
 )
-print(os.getenv("PINECONE_API_KEY"))
 
-# Get environment variables
-pinecone_api_key = os.environ.get("PINECONE_API_KEY")
-pinecone_index_name = os.environ.get("PINECONE_INDEX_NAME")
-openai_api_key = os.environ.get("OPENAI_API_KEY")
-# print(pinecone_api_key, pinecone_index_name, openai_api_key)
+# Load and set environment variables
+# Config.initialize()
 
-# Unstructured API environment variables
-unstructured_api_key = os.environ.get("UNSTRUCTURED_API_KEY")
-unstructured_api_url = os.environ.get("UNSTRUCTURED_API_URL")
-local_file_input_dir = os.environ.get("LOCAL_FILE_INPUT_DIR")
-local_file_output_dir = os.environ.get("LOCAL_FILE_OUTPUT_DIR")
-# print(unstructured_api_key, unstructured_api_url, local_file_input_dir, local_file_output_dir)
-
-# Set the base directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_DIR = os.path.join(BASE_DIR, local_file_input_dir)
-OUTPUT_DIR = os.path.join(BASE_DIR, local_file_output_dir)
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
-
-# Ensure input and output directories exist
-os.makedirs(INPUT_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Initialize a Pinecone client and OpenAI client with the API keys
-aclient = AsyncOpenAI(api_key=openai_api_key)
-pc = Pinecone(api_key=pinecone_api_key)
-
-# Create a Pinecone index if it doesn't exist
-if pc.list_indexes().indexes[0].name != pinecone_index_name:
-    pc.create_index(
-        name=pinecone_index_name,
-        dimension=1024,
-        metric="cosine",
-        spec=ServerlessSpec(
-            cloud='aws',
-            region='us-east-1'
-        )
-    )
-    print(f"Index {pinecone_index_name} created successfully!")
-else:
-    print(f"Index {pinecone_index_name} already exists.")
-
-# Wait for the index to be ready
-while not pc.describe_index(pinecone_index_name).status['ready']:
-    time.sleep(1)
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -92,6 +50,8 @@ def require_api_key(f):
 def check_file_availability(file, context, endpoint):
     arr = []
     counter = 1
+
+    OUTPUT_DIR = Config.OUTPUT_DIR
 
     if file is not None :
         with open(f"{os.path.join(OUTPUT_DIR, endpoint)}.json", "r") as f:
@@ -120,6 +80,14 @@ def ingest_teli_data():
         if "unique_id" not in request.form and ("file" not in request.files or "context" not in request.files):
             return jsonify({"error": "Missing required fields"}), 400
 
+        # Get the Pinecone client
+        pc = Config.pc
+        INPUT_DIR = Config.INPUT_DIR
+        OUTPUT_DIR = Config.OUTPUT_DIR
+        pinecone_index_name = Config.PINECONE_INDEX_NAME
+        unstructured_api_key = Config.UNSTRUCTURED_API_KEY
+        unstructured_api_url = Config.UNSTRUCTURED_API_URL
+
         unique_id = request.form.get("unique_id")
         context_str = request.form.get("context") if "context" in request.form else None
         file = request.files['file'] if 'file' in request.files else None
@@ -130,6 +98,7 @@ def ingest_teli_data():
         filename = None
         file_extension = None
         input_endpoint = None
+        input_file_path = None
 
         if file is not None:
             # Secure the filename
@@ -196,18 +165,21 @@ def ingest_teli_data():
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if file is not None:
-            # Clean up input and output directories
-            if os.path.exists(input_file_path):
-                os.remove(input_file_path)
-                for output_file in os.listdir(OUTPUT_DIR):
-                    os.remove(os.path.join(OUTPUT_DIR, output_file))
+        # Clean up input and output directories
+        if input_file_path and os.path.exists(input_file_path):
+            os.remove(input_file_path)
+        if file:
+            for output_file in os.listdir(OUTPUT_DIR):
+                output_file_path = os.path.join(OUTPUT_DIR, output_file)
+                if os.path.exists(output_file_path):
+                    os.remove(output_file_path)
         print("Clean up successful!")
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
     # Connect to the specified index
-    index = pc.Index(pinecone_index_name)
+    pc = Config.pc
+    index = pc.Index(Config.PINECONE_INDEX_NAME)
 
     # Fetch index description to get metadata (including namespaces)
     index_stats = index.describe_index_stats()
@@ -218,6 +190,8 @@ def namespace_exists(namespace_name):
 # Function to Get OpenAI GPT Response
 async def get_gpt_response(value, res=None):
     try:
+        aclient = Config.aclient
+
         response = await aclient.chat.completions.create(
             model="gpt-4o",  # or "gpt-3.5-turbo"
             messages=[
@@ -242,6 +216,10 @@ async def message_teli_data():
         data = request.get_json()
         if not data:
             return {"error": "Empty or invalid JSON body"}, 400
+
+        # Get the Pinecone client
+        pc = Config.pc
+        pinecone_index_name = Config.PINECONE_INDEX_NAME
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
@@ -298,6 +276,9 @@ async def message_teli_data():
 # @require_api_key
 def delete_namespace():
     try:
+        # Get the Pinecone client
+        pc = Config.pc
+
         # Grab data from the request body
         data = request.get_json()
         if not data:
@@ -314,7 +295,7 @@ def delete_namespace():
             return {"error": "Namespace not found in the index"}, 400
 
         # Delete the namespace from the index
-        index = pc.Index(pinecone_index_name)
+        index = pc.Index(Config.get('PINECONE_INDEX_NAME'))
         index.delete(delete_all=True, namespace=namespace)
 
         return jsonify({"message": "Namespace deleted successfully"}), 200
@@ -322,15 +303,38 @@ def delete_namespace():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-# Modal Deployment Functions
 @modal_app.function(
-        image=image,
-        secrets=[Secret.from_name("context-messenger-secrets")]
+    image=image,
+    secrets=[Secret.from_name("context-messenger-secrets")]
 )
 @asgi_app()
-def flask_app():
+def flask_asgi_app():
+    # Initialize the configuration
+    Config.initialize()
+
+    # Get Pinecone client and ensure the index exists
+    pc = Config.pc
+    pinecone_index_name = Config.PINECONE_INDEX_NAME
+
+    if pc.list_indexes().indexes[0].name != pinecone_index_name:
+        pc.create_index(
+            name=pinecone_index_name,
+            dimension=1024,
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+        )
+        print(f"Index {pinecone_index_name} created successfully!")
+    else:
+        print(f"Index {pinecone_index_name} already exists.")
+
+    # Wait until the Pinecone index is ready
+    while not pc.describe_index(pinecone_index_name).status["ready"]:
+        time.sleep(1)
+
+    # Return the Flask app
     return app
+
 
 @modal_app.local_entrypoint()
 def serve():
-    flask_app.serve()
+    flask_asgi_app.serve()
