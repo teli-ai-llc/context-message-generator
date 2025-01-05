@@ -25,9 +25,29 @@ quart_app = Quart(__name__)
 
 # Create a Modal App and Image with the required dependencies
 modal_app = App("teli-context-message-generator")
+from modal import Image, Mount, Secret
+
+from modal import Image
+
 image = (
     Image.debian_slim()
-    .pip_install_from_requirements("requirements.txt")
+    .apt_install("curl", "git", "protobuf-compiler")  # Install dependencies
+    .run_commands(
+        [
+            "curl -OL https://go.dev/dl/go1.20.8.linux-amd64.tar.gz",
+            "tar -C /usr/local -xzf go1.20.8.linux-amd64.tar.gz",
+            "rm go1.20.8.linux-amd64.tar.gz",
+            "ln -s /usr/local/go/bin/go /usr/bin/go",
+            "ln -s /usr/local/go/bin/gofmt /usr/bin/gofmt",
+            # Install protoc-gen-openapiv2
+            "go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@v2.14.0",
+            "cp $(go env GOPATH)/bin/protoc-gen-openapiv2 /usr/local/bin",
+            # Verify installation
+            "protoc-gen-openapiv2 --version || echo 'Installation failed'",
+        ]
+    )
+    .pip_install("protoc-gen-openapiv2")  # Install the Python package
+    .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
