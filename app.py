@@ -1,6 +1,7 @@
 import os, json
 from config import Config
 from quart import Quart, request, jsonify
+from quart_cors import cors
 from werkzeug.utils import secure_filename
 import time
 from functools import wraps
@@ -22,6 +23,7 @@ from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 load_dotenv()
 
 quart_app = Quart(__name__)
+quart_app = cors(quart_app, allow_origin="*")
 
 # Create a Modal App and Image with the required dependencies
 modal_app = App("teli-context-message-generator")
@@ -157,6 +159,7 @@ async def ingest_teli_data():
                 ),
                 uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
             ).run()
+            print("Pipeline ran successfully!")
 
         # Read processed output files
         context = check_file_availability(file, context_arr, input_endpoint)
@@ -245,7 +248,7 @@ async def message_teli_data():
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
-        stringified = str(message_history)[1:-1]
+        stringified = str(message_history)
 
         last_response = message_history[-1]["message"]
 
@@ -325,6 +328,7 @@ def delete_namespace():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+# For deployment with Modal
 @modal_app.function(
     image=image,
     secrets=[Secret.from_name("context-messenger-secrets")]
@@ -337,11 +341,11 @@ def quart_asgi_app():
     # Return the quart app
     return quart_app
 
-# For local development WITH Modal
+# Local entrypoint for running the app
 @modal_app.local_entrypoint()
 def serve():
     Config.initialize()
-    quart_app.run()
+    quart_app.run(host="0.0.0.0", port=5000)
 
 # For local development WITHOUT Modal
 # Config.initialize()
