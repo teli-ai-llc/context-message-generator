@@ -27,7 +27,7 @@ quart_app = cors(
     quart_app,
     allow_origin="*",
     allow_headers="*",
-    allow_methods=["GET", "POST", "PUT", "DELETE"]
+    allow_methods=["POST", "DELETE"]
 )
 
 # Create a Modal App and Image with the required dependencies
@@ -347,7 +347,7 @@ def quart_asgi_app():
 @modal_app.local_entrypoint()
 def serve():
     Config.initialize()
-    quart_app.run(host="0.0.0.0", port=5000)
+    quart_app.run()
 
 # For local development WITHOUT Modal
 # Config.initialize()
