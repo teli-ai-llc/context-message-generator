@@ -3,10 +3,12 @@ openai==1.59.3
 pinecone==5.4.2
 python-dotenv==1.0.1
 quart==0.20.0
-unstructured_ingest==0.3.11
+unstructured_ingest[remote]==0.3.11  # Updated with `[remote]` extras
+# unstructured_ingest==0.3.11
 Werkzeug==3.1.3
 googleapis-common-protos>=1.56.4
 protobuf>=3.20.0
 grpcio>=1.48.0
 grpcio-tools>=1.48.0
 googleapis-common-protos>=1.56.4
+protoc-gen-openapiv2

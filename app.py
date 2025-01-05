@@ -25,7 +25,7 @@ quart_app = Quart(__name__)
 
 # Create a Modal App and Image with the required dependencies
 modal_app = App("teli-context-message-generator")
-from modal import Image, Mount, Secret
+from modal import Image, Secret
 
 from modal import Image
 
@@ -46,7 +46,7 @@ image = (
             "protoc-gen-openapiv2 --version || echo 'Installation failed'",
         ]
     )
-    .pip_install("protoc-gen-openapiv2")  # Install the Python package
+    # .pip_install("protoc-gen-openapiv2")  # Install the Python package
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
@@ -338,8 +338,12 @@ def quart_asgi_app():
     # Return the quart app
     return quart_app
 
-# For local development using Modal
+# For local development WITH Modal
 @modal_app.local_entrypoint()
 def serve():
     Config.initialize()
     quart_app.run()
+
+# For local development WITHOUT Modal
+# Config.initialize()
+# quart_app.run()
