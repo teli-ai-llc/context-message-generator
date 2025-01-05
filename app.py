@@ -21,7 +21,6 @@ from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 
 load_dotenv()
 
-# app = Flask(__name__)
 quart_app = Quart(__name__)
 
 # Create a Modal App and Image with the required dependencies
@@ -325,7 +324,8 @@ def quart_asgi_app():
 
 @modal_app.local_entrypoint()
 def serve():
-    quart_asgi_app.serve()
+    quart_asgi_app.local()
+    # quart_asgi_app.serve()
 
 # For Development purposes
 # quart_app.run()
