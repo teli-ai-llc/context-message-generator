@@ -116,7 +116,6 @@ async def ingest_teli_data():
 
             # Save the uploaded file in the input directory in chunks
             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
-            # await file.save(input_file_path)
             with open(input_file_path, "wb") as f:
                 while True:
                     chunk = file.stream.read(CHUNK_SIZE)
