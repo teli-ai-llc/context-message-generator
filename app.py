@@ -23,19 +23,15 @@ from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 load_dotenv()
 
 quart_app = Quart(__name__)
-modal_app = cors(
+quart_app = cors(
     quart_app,
     allow_origin="*",
-    allow_methods=["POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"]
+    allow_headers="*",
+    allow_methods=["GET", "POST", "PUT", "DELETE"]
 )
-
 
 # Create a Modal App and Image with the required dependencies
 modal_app = App("context-message-generator")
-from modal import Image, Secret
-
-from modal import Image
 
 image = (
     Image.debian_slim()
