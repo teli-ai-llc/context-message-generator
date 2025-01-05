@@ -30,9 +30,6 @@ image = (
     .pip_install_from_requirements("requirements.txt")
 )
 
-# For DEV purposes, load the environment variables from the .env file
-# Config.initialize()
-
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
 
 def get_api_key():
@@ -321,11 +318,8 @@ def quart_asgi_app():
     # Return the quart app
     return quart_app
 
-
+# For local development using Modal
 @modal_app.local_entrypoint()
 def serve():
-    quart_asgi_app.local()
-    # quart_asgi_app.serve()
-
-# For Development purposes
-# quart_app.run()
+    Config.initialize()
+    quart_app.run()
