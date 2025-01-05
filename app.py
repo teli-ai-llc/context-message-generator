@@ -23,10 +23,16 @@ from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 load_dotenv()
 
 quart_app = Quart(__name__)
-quart_app = cors(quart_app, allow_origin="*")
+modal_app = cors(
+    quart_app,
+    allow_origin="https://your-allowed-origin.com",
+    allow_methods=["POST", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"]
+)
+
 
 # Create a Modal App and Image with the required dependencies
-modal_app = App("teli-context-message-generator")
+modal_app = App("context-message-generator")
 from modal import Image, Secret
 
 from modal import Image
