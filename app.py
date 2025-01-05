@@ -1,11 +1,10 @@
 import os, json
 from config import Config
-from flask import Flask, request, jsonify
+from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
-from pinecone import ServerlessSpec
 import time
 from functools import wraps
-import dotenv
+from dotenv import load_dotenv
 from modal import Image, App, Secret, asgi_app
 from openai import RateLimitError, OpenAIError
 
@@ -20,7 +19,10 @@ from unstructured_ingest.v2.processes.connectors.local import (
 )
 from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 
-app = Flask(__name__)
+load_dotenv()
+
+# app = Flask(__name__)
+quart_app = Quart(__name__)
 
 # Create a Modal App and Image with the required dependencies
 modal_app = App("teli-context-message-generator")
@@ -29,7 +31,7 @@ image = (
     .pip_install_from_requirements("requirements.txt")
 )
 
-# Load and set environment variables
+# For DEV purposes, load the environment variables from the .env file
 # Config.initialize()
 
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
@@ -73,11 +75,14 @@ def check_file_availability(file, context, endpoint):
 
     return arr
 
-@app.route('/ingest-teli-data', methods=['POST'])
+@quart_app.route('/ingest-teli-data', methods=['POST'])
 # @require_api_key
-def ingest_teli_data():
+async def ingest_teli_data():
     try:
-        if "unique_id" not in request.form and ("file" not in request.files or "context" not in request.files):
+        form_data = await request.form
+        file_data = await request.files
+
+        if "unique_id" not in form_data and ("file" not in file_data or "context" not in file_data):
             return jsonify({"error": "Missing required fields"}), 400
 
         # Get the Pinecone client
@@ -88,9 +93,9 @@ def ingest_teli_data():
         unstructured_api_key = Config.UNSTRUCTURED_API_KEY
         unstructured_api_url = Config.UNSTRUCTURED_API_URL
 
-        unique_id = request.form.get("unique_id")
-        context_str = request.form.get("context") if "context" in request.form else None
-        file = request.files['file'] if 'file' in request.files else None
+        unique_id = form_data.get("unique_id")
+        context_str = form_data.get("context") if "context" in form_data else None
+        file = file_data.get('file') if 'file' in file_data else None
 
         # Parse context string
         context_arr = json.loads(context_str) if context_str is not None else None
@@ -109,9 +114,15 @@ def ingest_teli_data():
             if file_extension not in [".pdf"]:
                 return jsonify({"error": "Unsupported file type"}), 400
 
-            # Save the uploaded file in the input directory
+            # Save the uploaded file in the input directory in chunks
             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
-            file.save(input_file_path)
+            # await file.save(input_file_path)
+            with open(input_file_path, "wb") as f:
+                while True:
+                    chunk = file.stream.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    f.write(chunk)
 
             # Use the Unstructured Pipeline to process the file
             Pipeline.from_configs(
@@ -168,12 +179,11 @@ def ingest_teli_data():
         # Clean up input and output directories
         if input_file_path and os.path.exists(input_file_path):
             os.remove(input_file_path)
-        if file:
             for output_file in os.listdir(OUTPUT_DIR):
                 output_file_path = os.path.join(OUTPUT_DIR, output_file)
                 if os.path.exists(output_file_path):
                     os.remove(output_file_path)
-        print("Clean up successful!")
+            print("Clean up successful!")
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
@@ -208,14 +218,12 @@ async def get_gpt_response(value, res=None):
     except Exception as e:
         return jsonify({"openai error": str(e)}), 400
 
-@app.route('/message-teli-data', methods=['POST'])
+@quart_app.route('/message-teli-data', methods=['POST'])
 # @require_api_key
 async def message_teli_data():
     try:
         # Grab data from the request body
-        data = request.get_json()
-        if not data:
-            return {"error": "Empty or invalid JSON body"}, 400
+        data = await request.json
 
         # Get the Pinecone client
         pc = Config.pc
@@ -272,7 +280,7 @@ async def message_teli_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/delete-namespace', methods=['DELETE'])
+@quart_app.route('/delete-namespace', methods=['DELETE'])
 # @require_api_key
 def delete_namespace():
     try:
@@ -308,33 +316,17 @@ def delete_namespace():
     secrets=[Secret.from_name("context-messenger-secrets")]
 )
 @asgi_app()
-def flask_asgi_app():
+def quart_asgi_app():
     # Initialize the configuration
     Config.initialize()
 
-    # Get Pinecone client and ensure the index exists
-    pc = Config.pc
-    pinecone_index_name = Config.PINECONE_INDEX_NAME
-
-    if pc.list_indexes().indexes[0].name != pinecone_index_name:
-        pc.create_index(
-            name=pinecone_index_name,
-            dimension=1024,
-            metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-        )
-        print(f"Index {pinecone_index_name} created successfully!")
-    else:
-        print(f"Index {pinecone_index_name} already exists.")
-
-    # Wait until the Pinecone index is ready
-    while not pc.describe_index(pinecone_index_name).status["ready"]:
-        time.sleep(1)
-
-    # Return the Flask app
-    return app
+    # Return the quart app
+    return quart_app
 
 
 @modal_app.local_entrypoint()
 def serve():
-    flask_asgi_app.serve()
+    quart_asgi_app.serve()
+
+# For Development purposes
+# quart_app.run()

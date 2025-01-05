@@ -37,7 +37,22 @@ class Config:
 
         # Initialize Pinecone client
         Config.pc = Pinecone(api_key=Config.PINECONE_API_KEY)
-        
+
+        if Config.pc.list_indexes().indexes[0].name != Config.PINECONE_INDEX_NAME:
+            Config.pc.create_index(
+                name=Config.PINECONE_INDEX_NAME,
+                dimension=1024,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+            )
+            print(f"Index {Config.PINECONE_INDEX_NAME,} created successfully!")
+        else:
+            print(f"Index {Config.PINECONE_INDEX_NAME,} already exists.")
+
+        # Wait until the Pinecone index is ready
+        while not Config.pc.describe_index(Config.PINECONE_INDEX_NAME).status["ready"]:
+            time.sleep(1)
+
         # Initialize OpenAI client
         Config.aclient = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
 

@@ -1,7 +1,7 @@
-Flask==3.1.0
 modal==0.71.0
 openai==1.59.3
 pinecone==5.4.2
 python-dotenv==1.0.1
+quart==0.20.0
 unstructured_ingest==0.3.11
 Werkzeug==3.1.3
