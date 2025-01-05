@@ -25,7 +25,7 @@ load_dotenv()
 quart_app = Quart(__name__)
 modal_app = cors(
     quart_app,
-    allow_origin="https://your-allowed-origin.com",
+    allow_origin="*",
     allow_methods=["POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"]
 )
