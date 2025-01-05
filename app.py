@@ -46,7 +46,6 @@ image = (
             "protoc-gen-openapiv2 --version || echo 'Installation failed'",
         ]
     )
-    # .pip_install("protoc-gen-openapiv2")  # Install the Python package
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
