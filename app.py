@@ -294,12 +294,12 @@ async def message_teli_data():
         curr_threshold = response.matches[0].score
         if curr_threshold <= threshold:
             gpt_response = await get_gpt_response(stringified)
-            return jsonify({"context": gpt_response}), 200
+            return jsonify({"response": gpt_response}), 200
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata['text']
         gpt_response = await get_gpt_response(stringified, curr_response)
-        return jsonify({"context": gpt_response}), 200
+        return jsonify({"response": gpt_response}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
