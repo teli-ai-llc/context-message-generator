@@ -1,1 +1,1 @@
-# teli-context-message-generator
+# context-message-generator
