@@ -346,6 +346,3 @@ def serve():
     Config.initialize()
     quart_app.run()
 
-# For local development WITHOUT Modal
-# Config.initialize()
-# quart_app.run()
