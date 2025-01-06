@@ -187,7 +187,7 @@ async def ingest_teli_data():
         namespace = f"{unique_id}-context"
         index.upsert(namespace=namespace, vectors=records)
 
-        # Significantly slows down response time, but necessary for the data to be available for querying
+        # IMPORTANT: Significantly slows down response time, but necessary for the data to be available for querying
         time.sleep(10)
 
         if file:
