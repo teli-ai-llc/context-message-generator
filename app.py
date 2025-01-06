@@ -194,11 +194,15 @@ async def ingest_teli_data():
             # Clean up input and output directories
             if input_file_path and os.path.exists(input_file_path):
                 os.remove(input_file_path)
-                for output_file in os.listdir(OUTPUT_DIR):
-                    output_file_path = os.path.join(OUTPUT_DIR, output_file)
-                    if os.path.exists(output_file_path):
-                        os.remove(output_file_path)
-                print("Clean up successful!")
+
+            output_files = [os.path.join(OUTPUT_DIR, output_file) for output_file in os.listdir(OUTPUT_DIR)]
+            for output_file_path in output_files:
+                try:
+                    os.remove(output_file_path)
+                except FileNotFoundError:
+                    pass  # Skip if the file doesn't exist
+
+            print("Clean up successful!")
 
         return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
 
@@ -288,12 +292,12 @@ async def message_teli_data():
         # Establish score threshold for the highest rated response
         threshold = 0.8
         curr_threshold = response.matches[0].score
-        curr_response = response.matches[0].metadata['text']
         if curr_threshold <= threshold:
             gpt_response = await get_gpt_response(stringified)
             return jsonify({"context": gpt_response}), 200
 
         # Return the most relevant context
+        curr_response = response.matches[0].metadata['text']
         gpt_response = await get_gpt_response(stringified, curr_response)
         return jsonify({"context": gpt_response}), 200
 
