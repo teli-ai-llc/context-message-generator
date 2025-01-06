@@ -5,7 +5,7 @@ from openai import AsyncOpenAI
 import time
 from dotenv import load_dotenv
 
-# Load environment variables for local modal development
+# Load environment variables for LOCAL modal development
 load_dotenv()
 
 class Config:

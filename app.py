@@ -50,7 +50,7 @@ image = (
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
-# Initialize the Config class
+# Initialize the Config class with environment variables
 Config.initialize()
 
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
@@ -95,7 +95,7 @@ def check_file_availability(file, context, endpoint):
     return arr
 
 @quart_app.route('/ingest-teli-data', methods=['POST'])
-# @require_api_key
+@require_api_key
 async def ingest_teli_data():
     try:
         form_data = await request.form
@@ -243,7 +243,7 @@ async def get_gpt_response(value, res=None):
         return jsonify({"openai error": str(e)}), 400
 
 @quart_app.route('/message-teli-data', methods=['POST'])
-# @require_api_key
+@require_api_key
 async def message_teli_data():
     try:
         # Grab data from the request body
@@ -305,14 +305,15 @@ async def message_teli_data():
         return jsonify({"error": str(e)}), 400
 
 @quart_app.route('/delete-namespace', methods=['DELETE'])
-# @require_api_key
-def delete_namespace():
+@require_api_key
+async def delete_namespace():
     try:
         # Get the Pinecone client
         pc = Config.pc
+        pinecone_index_name = Config.PINECONE_INDEX_NAME
 
         # Grab data from the request body
-        data = request.get_json()
+        data = await request.json
         if not data:
             return {"error": "Empty or invalid JSON body"}, 400
 
@@ -327,7 +328,7 @@ def delete_namespace():
             return {"error": "Namespace not found in the index"}, 400
 
         # Delete the namespace from the index
-        index = pc.Index(Config.get('PINECONE_INDEX_NAME'))
+        index = pc.Index(pinecone_index_name)
         index.delete(delete_all=True, namespace=namespace)
 
         return jsonify({"message": "Namespace deleted successfully"}), 200
