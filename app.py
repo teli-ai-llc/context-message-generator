@@ -50,6 +50,9 @@ image = (
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
+# Initialize the Config class
+Config.initialize()
+
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
 
 def get_api_key():
@@ -110,11 +113,11 @@ async def ingest_teli_data():
         unstructured_api_url = Config.UNSTRUCTURED_API_URL
 
         unique_id = form_data.get("unique_id")
-        context_str = form_data.get("context") if "context" in form_data else None
-        file = file_data.get('file') if 'file' in file_data else None
+        context_str = form_data.get("context")
+        file = file_data.get('file')
 
         # Parse context string
-        context_arr = json.loads(context_str) if context_str is not None else None
+        context_arr = json.loads(context_str) if context_str else None
 
         filename = None
         file_extension = None
@@ -184,22 +187,23 @@ async def ingest_teli_data():
         namespace = f"{unique_id}-context"
         index.upsert(namespace=namespace, vectors=records)
 
+        # Significantly slows down response time, but necessary for the data to be available for querying
         time.sleep(10)
+
+        if file:
+            # Clean up input and output directories
+            if input_file_path and os.path.exists(input_file_path):
+                os.remove(input_file_path)
+                for output_file in os.listdir(OUTPUT_DIR):
+                    output_file_path = os.path.join(OUTPUT_DIR, output_file)
+                    if os.path.exists(output_file_path):
+                        os.remove(output_file_path)
+                print("Clean up successful!")
 
         return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-    finally:
-        # Clean up input and output directories
-        if input_file_path and os.path.exists(input_file_path):
-            os.remove(input_file_path)
-            for output_file in os.listdir(OUTPUT_DIR):
-                output_file_path = os.path.join(OUTPUT_DIR, output_file)
-                if os.path.exists(output_file_path):
-                    os.remove(output_file_path)
-            print("Clean up successful!")
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
@@ -334,14 +338,9 @@ def delete_namespace():
 )
 @asgi_app()
 def quart_asgi_app():
-    # Initialize the configuration
-    Config.initialize()
-
-    # Return the quart app
     return quart_app
 
 # Local entrypoint for running the app
 @modal_app.local_entrypoint()
 def serve():
-    Config.initialize()
     quart_app.run()

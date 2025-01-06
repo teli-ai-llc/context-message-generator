@@ -23,14 +23,15 @@ class Config:
 
     @staticmethod
     def initialize():
+
         # Fetch environment variables and set them
-        Config.PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-        Config.PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
-        Config.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-        Config.UNSTRUCTURED_API_KEY = os.getenv("UNSTRUCTURED_API_KEY")
-        Config.UNSTRUCTURED_API_URL = os.getenv("UNSTRUCTURED_API_URL")
-        Config.LOCAL_FILE_INPUT_DIR = os.getenv("LOCAL_FILE_INPUT_DIR")
-        Config.LOCAL_FILE_OUTPUT_DIR = os.getenv("LOCAL_FILE_OUTPUT_DIR")
+        Config.PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
+        Config.PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME")
+        Config.OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+        Config.UNSTRUCTURED_API_KEY = os.environ.get("UNSTRUCTURED_API_KEY")
+        Config.UNSTRUCTURED_API_URL = os.environ.get("UNSTRUCTURED_API_URL")
+        Config.LOCAL_FILE_INPUT_DIR = os.environ.get("LOCAL_FILE_INPUT_DIR")
+        Config.LOCAL_FILE_OUTPUT_DIR = os.environ.get("LOCAL_FILE_OUTPUT_DIR")
 
         # Set up directories
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
