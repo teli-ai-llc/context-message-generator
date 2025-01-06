@@ -29,8 +29,8 @@ quart_app = cors(
 
 # Load the configuration and initialize env variables
 quart_app.config["APP_CONFIG"] = Config()
-quart_app.config["APP_CONFIG"].initialize()
 config_class = quart_app.config["APP_CONFIG"]
+config_class.initialize()
 
 # Create a Modal App and Image with the required dependencies
 modal_app = App("context-message-generator")
@@ -59,7 +59,7 @@ def check_file_availability(file, context, endpoint):
     arr = []
     counter = 1
 
-    OUTPUT_DIR = Config.OUTPUT_DIR
+    OUTPUT_DIR = config_class.OUTPUT_DIR
 
     if file is not None :
         with open(f"{os.path.join(OUTPUT_DIR, endpoint)}.json", "r") as f:
@@ -199,8 +199,8 @@ async def ingest_teli_data():
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
     # Connect to the specified index
-    pc = Config.pc
-    index = pc.Index(Config.PINECONE_INDEX_NAME)
+    pc = config_class.pc
+    index = pc.Index(config_class.PINECONE_INDEX_NAME)
 
     # Fetch index description to get metadata (including namespaces)
     index_stats = index.describe_index_stats()
@@ -211,7 +211,7 @@ def namespace_exists(namespace_name):
 # Function to Get OpenAI GPT Response
 async def get_gpt_response(value, res=None):
     try:
-        aclient = Config.aclient
+        aclient = config_class.aclient
 
         response = await aclient.chat.completions.create(
             model="gpt-4o",  # or "gpt-3.5-turbo"
@@ -237,8 +237,8 @@ async def message_teli_data():
         data = await request.json
 
         # Get the Pinecone client
-        pc = Config.pc
-        pinecone_index_name = Config.PINECONE_INDEX_NAME
+        pc = config_class.pc
+        pinecone_index_name = config_class.PINECONE_INDEX_NAME
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
@@ -296,8 +296,8 @@ async def message_teli_data():
 async def delete_namespace():
     try:
         # Get the Pinecone client
-        pc = Config.pc
-        pinecone_index_name = Config.PINECONE_INDEX_NAME
+        pc = config_class.pc
+        pinecone_index_name = config_class.PINECONE_INDEX_NAME
 
         # Grab data from the request body
         data = await request.json
@@ -335,5 +335,4 @@ def quart_asgi_app():
 # Local entrypoint for running the app
 @modal_app.local_entrypoint()
 def serve():
-    # initialize_config_once()
     quart_app.run()
