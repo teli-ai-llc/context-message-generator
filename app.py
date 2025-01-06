@@ -4,6 +4,7 @@ from quart import Quart, request, jsonify
 from quart_cors import cors
 from werkzeug.utils import secure_filename
 import time
+from dotenv import load_dotenv
 from functools import wraps
 from modal import Image, App, Secret, asgi_app
 from openai import RateLimitError, OpenAIError
@@ -345,4 +346,3 @@ def quart_asgi_app():
 def serve():
     Config.initialize()
     quart_app.run()
-

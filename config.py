@@ -3,6 +3,10 @@ from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone import ServerlessSpec
 from openai import AsyncOpenAI
 import time
+from dotenv import load_dotenv
+
+# Load environment variables for local modal development
+load_dotenv()
 
 class Config:
     PINECONE_API_KEY = None
