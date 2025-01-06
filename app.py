@@ -5,7 +5,6 @@ from quart_cors import cors
 from werkzeug.utils import secure_filename
 import time
 from functools import wraps
-from dotenv import load_dotenv
 from modal import Image, App, Secret, asgi_app
 from openai import RateLimitError, OpenAIError
 
@@ -19,8 +18,6 @@ from unstructured_ingest.v2.processes.connectors.local import (
     LocalUploaderConfig
 )
 from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
-
-load_dotenv()
 
 quart_app = Quart(__name__)
 quart_app = cors(
