@@ -1,14 +1,15 @@
 import os
+import time
 from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone import ServerlessSpec
 from openai import AsyncOpenAI
-import time
 from dotenv import load_dotenv
 
-# Load environment variables for LOCAL modal development
+# Load LOCAL environment variables from .env file
 load_dotenv()
 
 class Config:
+    # Class-level attributes
     PINECONE_API_KEY = None
     PINECONE_INDEX_NAME = None
     OPENAI_API_KEY = None
@@ -23,15 +24,18 @@ class Config:
 
     @staticmethod
     def initialize():
-
-        # Fetch environment variables and set them
+        # Fetch environment variables
         Config.PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
         Config.PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME")
         Config.OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
         Config.UNSTRUCTURED_API_KEY = os.environ.get("UNSTRUCTURED_API_KEY")
         Config.UNSTRUCTURED_API_URL = os.environ.get("UNSTRUCTURED_API_URL")
-        Config.LOCAL_FILE_INPUT_DIR = os.environ.get("LOCAL_FILE_INPUT_DIR")
-        Config.LOCAL_FILE_OUTPUT_DIR = os.environ.get("LOCAL_FILE_OUTPUT_DIR")
+        Config.LOCAL_FILE_INPUT_DIR = os.environ.get("LOCAL_FILE_INPUT_DIR", "input")
+        Config.LOCAL_FILE_OUTPUT_DIR = os.environ.get("LOCAL_FILE_OUTPUT_DIR", "output")
+
+        # Validate required environment variables
+        if not all([Config.PINECONE_API_KEY, Config.PINECONE_INDEX_NAME, Config.OPENAI_API_KEY]):
+            raise ValueError("Missing required environment variables for Pinecone or OpenAI.")
 
         # Set up directories
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,24 +45,30 @@ class Config:
         os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
 
         # Initialize Pinecone client
-        Config.pc = Pinecone(api_key=Config.PINECONE_API_KEY)
+        try:
+            Config.pc = Pinecone(api_key=Config.PINECONE_API_KEY)
 
-        if Config.pc.list_indexes().indexes[0].name != Config.PINECONE_INDEX_NAME:
-            Config.pc.create_index(
-                name=Config.PINECONE_INDEX_NAME,
-                dimension=1024,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-            )
-            print(f"Index {Config.PINECONE_INDEX_NAME,} created successfully!")
-        else:
-            print(f"Index {Config.PINECONE_INDEX_NAME,} already exists.")
+            if Config.PINECONE_INDEX_NAME not in [index.name for index in Config.pc.list_indexes().indexes]:
+                Config.pc.create_index(
+                    name=Config.PINECONE_INDEX_NAME,
+                    dimension=1024,  # Replace with dynamic dimension if needed
+                    metric="cosine",  # Replace with dynamic metric if needed
+                    spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+                )
+                # Wait until the Pinecone index is ready
+                while not Config.pc.describe_index(Config.PINECONE_INDEX_NAME).status["ready"]:
+                    time.sleep(1)
+                print(f"Index {Config.PINECONE_INDEX_NAME} created successfully!")
+            else:
+                print(f"Index {Config.PINECONE_INDEX_NAME} already exists.")
 
-        # Wait until the Pinecone index is ready
-        while not Config.pc.describe_index(Config.PINECONE_INDEX_NAME).status["ready"]:
-            time.sleep(1)
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Pinecone: {str(e)}")
 
         # Initialize OpenAI client
-        Config.aclient = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
+        try:
+            Config.aclient = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize OpenAI client: {str(e)}")
 
         print("Config initialized successfully!")

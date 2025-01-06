@@ -27,31 +27,18 @@ quart_app = cors(
     allow_methods=["POST", "DELETE"]
 )
 
+# Load the configuration and initialize env variables
+quart_app.config["APP_CONFIG"] = Config()
+quart_app.config["APP_CONFIG"].initialize()
+config_class = quart_app.config["APP_CONFIG"]
+
 # Create a Modal App and Image with the required dependencies
 modal_app = App("context-message-generator")
 
 image = (
     Image.debian_slim()
-    .apt_install("curl", "git", "protobuf-compiler")  # Install dependencies
-    .run_commands(
-        [
-            "curl -OL https://go.dev/dl/go1.20.8.linux-amd64.tar.gz",
-            "tar -C /usr/local -xzf go1.20.8.linux-amd64.tar.gz",
-            "rm go1.20.8.linux-amd64.tar.gz",
-            "ln -s /usr/local/go/bin/go /usr/bin/go",
-            "ln -s /usr/local/go/bin/gofmt /usr/bin/gofmt",
-            # Install protoc-gen-openapiv2
-            "go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@v2.14.0",
-            "cp $(go env GOPATH)/bin/protoc-gen-openapiv2 /usr/local/bin",
-            # Verify installation
-            "protoc-gen-openapiv2 --version || echo 'Installation failed'",
-        ]
-    )
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
-
-# Initialize the Config class with environment variables
-Config.initialize()
 
 CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
 
@@ -105,12 +92,12 @@ async def ingest_teli_data():
             return jsonify({"error": "Missing required fields"}), 400
 
         # Get the Pinecone client
-        pc = Config.pc
-        INPUT_DIR = Config.INPUT_DIR
-        OUTPUT_DIR = Config.OUTPUT_DIR
-        pinecone_index_name = Config.PINECONE_INDEX_NAME
-        unstructured_api_key = Config.UNSTRUCTURED_API_KEY
-        unstructured_api_url = Config.UNSTRUCTURED_API_URL
+        pc = config_class.pc
+        INPUT_DIR = config_class.INPUT_DIR
+        OUTPUT_DIR = config_class.OUTPUT_DIR
+        pinecone_index_name = config_class.PINECONE_INDEX_NAME
+        unstructured_api_key = config_class.UNSTRUCTURED_API_KEY
+        unstructured_api_url = config_class.UNSTRUCTURED_API_URL
 
         unique_id = form_data.get("unique_id")
         context_str = form_data.get("context")
@@ -348,4 +335,5 @@ def quart_asgi_app():
 # Local entrypoint for running the app
 @modal_app.local_entrypoint()
 def serve():
+    # initialize_config_once()
     quart_app.run()
