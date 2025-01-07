@@ -111,18 +111,15 @@ async def ingest_teli_data():
             # Secure the filename
             filename = secure_filename(file.filename)
             file_extension = os.path.splitext(filename)[1].lower()
-            input_endpoint = f"{unique_id}-{filename}"
 
-            if file_extension not in [".pdf"]:
+            if file_extension != ".pdf":
                 return jsonify({"error": "Unsupported file type"}), 400
 
             # Save the uploaded file in the input directory in chunks
+            input_endpoint = f"{unique_id}-{filename}"
             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
             with open(input_file_path, "wb") as f:
-                while True:
-                    chunk = file.stream.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
+                for chunk in iter(lambda: file.stream.read(CHUNK_SIZE), b""):
                     f.write(chunk)
 
             # Use the Unstructured Pipeline to process the file
