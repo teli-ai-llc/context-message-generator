@@ -59,7 +59,7 @@ def format_file_for_vectorizing(file, context, endpoint):
     arr = []
     OUTPUT_DIR = config_class.OUTPUT_DIR
 
-    counter = 0
+    counter = 1
 
     if file:
         with open(os.path.join(OUTPUT_DIR, f"{endpoint}.json"), "r") as f:
