@@ -222,20 +222,21 @@ async def ingest_teli_data():
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
-        index = config_class.pc.Index(config_class.PINECONE_INDEX_NAME)
-        metadata = index.describe_index_stats().get("namespaces", {})
-        return namespace_name in metadata
+    index = config_class.pc.Index(config_class.PINECONE_INDEX_NAME)
+    metadata = index.describe_index_stats().get("namespaces", {})
+    return namespace_name in metadata
 
-# Function to Get OpenAI GPT Response
+# Get OpenAI GPT Response
 async def get_gpt_response(value, res=None):
+    aclient = config_class.aclient
     try:
-        aclient = config_class.aclient
+        context_message = value if res is None else value + f"Use the following context: {res}"
 
         response = await aclient.chat.completions.create(
             model="gpt-4o",  # or "gpt-3.5-turbo"
             messages=[
                 {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided."},
-                {"role": "user", "content": value if res is None else value + f"Use the following context: {res}"}
+                {"role": "user", "content": context_message}
             ],
             max_tokens=16384
         )
