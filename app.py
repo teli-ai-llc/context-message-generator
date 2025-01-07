@@ -256,8 +256,7 @@ async def message_teli_data():
         data = await request.json
 
         # Get the Pinecone client
-        pc = config_class.pc
-        pinecone_index_name = config_class.PINECONE_INDEX_NAME
+        pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
@@ -298,12 +297,12 @@ async def message_teli_data():
         # Establish score threshold for the highest rated response
         threshold = 0.8
         curr_threshold = response.matches[0].score
-        if curr_threshold <= threshold:
+        if curr_threshold < threshold:
             gpt_response = await get_gpt_response(stringified)
             return jsonify({"response": gpt_response}), 200
 
         # Return the most relevant context
-        curr_response = response.matches[0].metadata['text']
+        curr_response = response.matches[0].metadata.get('text', '')
         gpt_response = await get_gpt_response(stringified, curr_response)
         return jsonify({"response": gpt_response}), 200
 
@@ -315,8 +314,7 @@ async def message_teli_data():
 async def delete_namespace():
     try:
         # Get the Pinecone client
-        pc = config_class.pc
-        pinecone_index_name = config_class.PINECONE_INDEX_NAME
+        pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
         # Grab data from the request body
         data = await request.json
