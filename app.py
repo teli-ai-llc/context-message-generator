@@ -199,14 +199,19 @@ async def ingest_teli_data():
         if file:
             # Clean up input and output directories
             if input_file_path and os.path.exists(input_file_path):
-                os.remove(input_file_path)
-
-            output_files = [os.path.join(OUTPUT_DIR, output_file) for output_file in os.listdir(OUTPUT_DIR)]
-            for output_file_path in output_files:
                 try:
-                    os.remove(output_file_path)
-                except FileNotFoundError:
-                    pass  # Skip if the file doesn't exist
+                    os.remove(input_file_path)
+                except Exception as e:
+                    print(f"Error deleting input file: {e}")
+
+            try:
+                output_files = [os.path.join(OUTPUT_DIR, file) for file in os.listdir(OUTPUT_DIR)]
+                for output_file in output_files:
+                    os.remove(output_file)
+            except FileNotFoundError:
+                print("No output files found")
+            except Exception as e:
+                print(f"Error reading output files: {e}")
 
             print("Clean up successful!")
 
@@ -217,15 +222,9 @@ async def ingest_teli_data():
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
-    # Connect to the specified index
-    pc = config_class.pc
-    index = pc.Index(config_class.PINECONE_INDEX_NAME)
-
-    # Fetch index description to get metadata (including namespaces)
-    index_stats = index.describe_index_stats()
-
-    # Check if the namespace exists in the index metadata
-    return namespace_name in index_stats.get("namespaces", {})
+        index = config_class.pc.Index(config_class.PINECONE_INDEX_NAME)
+        metadata = index.describe_index_stats().get("namespaces", {})
+        return namespace_name in metadata
 
 # Function to Get OpenAI GPT Response
 async def get_gpt_response(value, res=None):
