@@ -153,7 +153,7 @@ async def ingest_teli_data():
         #     parameters={"input_type": "passage", "truncate": "END"}
         # )
 
-        # Handle large batch sizes to avoid memory issues and input size limits
+        # Handle embedding batch sizes to avoid memory issues and input size limits
         batch_size = 100
         text_inputs = [c['text'] for c in context]
         embeddings = []
@@ -169,19 +169,29 @@ async def ingest_teli_data():
             )
             embeddings.extend(batch_embeddings)
 
-        # Prepare the records for Pinecone
-        records = []
-        for c, e in zip(context, embeddings):
-            records.append({
+        # Prepare the records
+        records = [
+            {
                 "id": c['id'],
                 "values": e['values'],
-                "metadata": {'text': c['text']}
-            })
+                "metadata": {"text": c['text']}
+            }
+            for c, e in zip(context, embeddings)
+        ]
 
-        # Upsert into Pinecone
+        # Upsert records in batches to avoid memory issues and input size limits
         index = pc.Index(pinecone_index_name)
         namespace = f"{unique_id}-context"
-        index.upsert(namespace=namespace, vectors=records)
+        batch = []
+        for record in records:
+            batch.append(record)
+            if len(batch) == batch_size:
+                index.upsert(namespace=namespace, vectors=batch)
+                batch.clear()
+
+        # Upsert leftover records
+        if batch:
+            index.upsert(namespace=namespace, vectors=batch)
 
         # IMPORTANT: Significantly slows down response time, but necessary for the data to be available for querying
         time.sleep(10)
