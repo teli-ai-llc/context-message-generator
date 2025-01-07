@@ -146,12 +146,28 @@ async def ingest_teli_data():
         # Read processed output files
         context = format_file_for_vectorizing(file, context_arr, input_endpoint)
 
-        # Convert the text into numerical vectors for Pinecone
-        embeddings = pc.inference.embed(
-            model="multilingual-e5-large",
-            inputs=[c['text'] for c in context],
-            parameters={"input_type": "passage", "truncate": "END"}
-        )
+        # # Convert the text into numerical vectors for Pinecone
+        # embeddings = pc.inference.embed(
+        #     model="multilingual-e5-large",
+        #     inputs=[c['text'] for c in context],
+        #     parameters={"input_type": "passage", "truncate": "END"}
+        # )
+
+        # Handle large batch sizes to avoid memory issues and input size limits
+        batch_size = 100
+        text_inputs = [c['text'] for c in context]
+        embeddings = []
+        for i in range(0, len(text_inputs), batch_size):
+            batch = text_inputs[i:i + batch_size]
+            batch_embeddings = pc.inference.embed(
+                model="multilingual-e5-large",
+                inputs=batch,
+                parameters={
+                    "input_type": "passage",
+                    "truncate": "END",
+                },
+            )
+            embeddings.extend(batch_embeddings)
 
         # Prepare the records for Pinecone
         records = []
