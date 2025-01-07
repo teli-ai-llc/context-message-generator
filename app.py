@@ -55,29 +55,26 @@ def require_api_key(f):
 
     return decorated_function
 
-def check_file_availability(file, context, endpoint):
+def format_file_for_vectorizing(file, context, endpoint):
     arr = []
-    counter = 1
-
     OUTPUT_DIR = config_class.OUTPUT_DIR
 
-    if file is not None :
-        with open(f"{os.path.join(OUTPUT_DIR, endpoint)}.json", "r") as f:
-            content = json.load(f)
-            for obj in content:
-                arr.append({
-                    "id": f"vec{counter}",
-                    "text": obj['text']
-                })
-                counter += 1
+    counter = 0
 
-    if context is not None:
-        for text in context:
-            arr.append({
-                "id": f"vec{counter}",
-                "text": text
-            })
-            counter += 1
+    if file:
+        with open(os.path.join(OUTPUT_DIR, f"{endpoint}.json"), "r") as f:
+            content = json.load(f)
+            arr.extend(
+                {"id": f"vec{counter + i}", "text": obj["text"]}
+                for i, obj in enumerate(content)
+            )
+        counter += len(content)
+
+    if context:
+        arr.extend(
+            {"id": f"vec{counter + i}", "text": text}
+            for i, text in enumerate(context)
+        )
 
     return arr
 
@@ -151,7 +148,7 @@ async def ingest_teli_data():
             print("Pipeline ran successfully!")
 
         # Read processed output files
-        context = check_file_availability(file, context_arr, input_endpoint)
+        context = format_file_for_vectorizing(file, context_arr, input_endpoint)
 
         # Convert the text into numerical vectors for Pinecone
         embeddings = pc.inference.embed(
