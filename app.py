@@ -88,27 +88,26 @@ async def ingest_teli_data():
         if "unique_id" not in form_data and ("file" not in file_data or "context" not in file_data):
             return jsonify({"error": "Missing required fields"}), 400
 
-        # Get the Pinecone client
-        pc = config_class.pc
-        INPUT_DIR = config_class.INPUT_DIR
-        OUTPUT_DIR = config_class.OUTPUT_DIR
-        pinecone_index_name = config_class.PINECONE_INDEX_NAME
-        unstructured_api_key = config_class.UNSTRUCTURED_API_KEY
-        unstructured_api_url = config_class.UNSTRUCTURED_API_URL
+        # Get the Pinecone client and configuration details
+        pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
+            config_class.pc,
+            config_class.INPUT_DIR,
+            config_class.OUTPUT_DIR,
+            config_class.PINECONE_INDEX_NAME,
+            config_class.UNSTRUCTURED_API_KEY,
+            config_class.UNSTRUCTURED_API_URL,
+        )
 
         unique_id = form_data.get("unique_id")
-        context_str = form_data.get("context")
+        context_str = form_data.get("context", "")
         file = file_data.get('file')
 
         # Parse context string
-        context_arr = json.loads(context_str) if context_str else None
+        context_arr = json.loads(context_str) if context_str else []
 
-        filename = None
-        file_extension = None
-        input_endpoint = None
-        input_file_path = None
+        filename = file_extension = input_endpoint = input_file_path = None
 
-        if file is not None:
+        if file:
             # Secure the filename
             filename = secure_filename(file.filename)
             file_extension = os.path.splitext(filename)[1].lower()
