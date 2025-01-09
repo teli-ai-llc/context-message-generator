@@ -302,19 +302,12 @@ async def message_teli_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@quart_app.route('/delete-namespace', methods=['DELETE'])
+@quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])
 @require_api_key
-async def delete_namespace():
+async def delete_namespace(unique_id):
     try:
         # Get the Pinecone client
         pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
-
-        # Grab data from the request body
-        data = await request.json
-        if not data:
-            return {"error": "Empty or invalid JSON body"}, 400
-
-        unique_id = data.get("unique_id")
 
         if not unique_id:
             return {"error": "Missing required fields"}, 400
