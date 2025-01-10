@@ -40,8 +40,6 @@ image = (
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
-CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
-
 def get_api_key():
     return os.environ.get("API_KEY")
 
@@ -118,6 +116,7 @@ async def ingest_teli_data():
             # Save the uploaded file in the input directory in chunks
             input_endpoint = f"{unique_id}-{filename}"
             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
+            CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
             with open(input_file_path, "wb") as f:
                 for chunk in iter(lambda: file.stream.read(CHUNK_SIZE), b""):
                     f.write(chunk)
@@ -186,7 +185,7 @@ async def ingest_teli_data():
         if batch:
             index.upsert(namespace=namespace, vectors=batch)
 
-        # IMPORTANT: Significantly slows down response time, but necessary for the data to be available for querying
+        # IMPORTANT: Significantly slows down response time, but necessary for the vectorizing process to complete
         time.sleep(10)
 
         if file:
