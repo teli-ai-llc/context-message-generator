@@ -245,8 +245,8 @@ async def get_gpt_response():
             response_format=Sentiment,
             max_tokens=16384
         )
-        print(response.choices[0].message.content)
-        return response.choices[0].message.content
+
+        return {**response.choices[0].message.parsed.dict(), **response.usage.dict()}
     except RateLimitError as e:
         return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
     except OpenAIError as e:
