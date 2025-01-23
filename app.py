@@ -220,13 +220,13 @@ def namespace_exists(namespace_name):
     return namespace_name in metadata
 
 
-class Sentiment(BaseModel):
-    response: str
-    is_conversation_over: str
-
 # Get OpenAI GPT Response
 async def get_gpt_response(value, res=None):
     aclient = config_class.aclient
+
+    class Sentiment(BaseModel):
+        response: str
+        is_conversation_over: str
 
     try:
         context_message = value if res is None else value + f"Use the following context: {res}"
