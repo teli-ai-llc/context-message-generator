@@ -261,7 +261,7 @@ async def message_teli_data():
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
-        stringified = str(message_history)
+        message_history = str(message_history)
 
         last_response = message_history[-1]["message"]
 
@@ -299,14 +299,14 @@ async def message_teli_data():
         threshold = 0.8
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
-            gpt_response = await get_gpt_response(stringified)
+            gpt_response = await get_gpt_response(message_history)
             if gpt_response.response.is_conversation_over == "True":
                 return jsonify({"response": ""}), 200
             return jsonify({"response": gpt_response}), 200
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
-        gpt_response = await get_gpt_response(stringified, curr_response)
+        gpt_response = await get_gpt_response(message_history, curr_response)
         if gpt_response.response.is_conversation_over == "True":
             return jsonify({"response": ""}), 200
         return jsonify({"response": gpt_response}), 200
