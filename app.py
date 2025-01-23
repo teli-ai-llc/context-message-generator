@@ -7,6 +7,7 @@ import time
 from functools import wraps
 from modal import Image, App, Secret, asgi_app
 from openai import RateLimitError, OpenAIError
+from pydantic import BaseModel
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -218,20 +219,33 @@ def namespace_exists(namespace_name):
     metadata = index.describe_index_stats().get("namespaces", {})
     return namespace_name in metadata
 
-# Get OpenAI GPT Response
-async def get_gpt_response(value, res=None):
-    aclient = config_class.aclient
-    try:
-        context_message = value if res is None else value + f"Use the following context: {res}"
 
-        response = await aclient.chat.completions.create(
-            model="gpt-4o",  # or "gpt-3.5-turbo"
+class Sentiment(BaseModel):
+    response: str
+    is_conversation_over: str
+
+# Get OpenAI GPT Response
+@quart_app.route('/get-gpt-response', methods=['POST'])
+async def get_gpt_response():
+    aclient = config_class.aclient
+
+    data = await request.json
+    context_message = data.get("context_message")
+    context_message = str(context_message)
+
+    try:
+        # context_message = value if res is None else value + f"Use the following context: {res}"
+
+        response = await aclient.beta.chat.completions.parse(
+            model="gpt-4o-mini",  # or "gpt-3.5-turbo"
             messages=[
-                {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided."},
+                {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided. If the conversation is over, supply a sentiment value of True and False if it's not over"},
                 {"role": "user", "content": context_message}
             ],
+            response_format=Sentiment,
             max_tokens=16384
         )
+        print(response.choices[0].message.content)
         return response.choices[0].message.content
     except RateLimitError as e:
         return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
@@ -291,11 +305,15 @@ async def message_teli_data():
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
             gpt_response = await get_gpt_response(stringified)
+            if gpt_response.response.is_conversation_over == "True":
+                return jsonify({"response": ""}), 200
             return jsonify({"response": gpt_response}), 200
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
         gpt_response = await get_gpt_response(stringified, curr_response)
+        if gpt_response.response.is_conversation_over == "True":
+            return jsonify({"response": ""}), 200
         return jsonify({"response": gpt_response}), 200
 
     except Exception as e:
