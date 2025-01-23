@@ -225,19 +225,14 @@ class Sentiment(BaseModel):
     is_conversation_over: str
 
 # Get OpenAI GPT Response
-@quart_app.route('/get-gpt-response', methods=['POST'])
-async def get_gpt_response():
+async def get_gpt_response(value, res=None):
     aclient = config_class.aclient
 
-    data = await request.json
-    context_message = data.get("context_message")
-    context_message = str(context_message)
-
     try:
-        # context_message = value if res is None else value + f"Use the following context: {res}"
+        context_message = value if res is None else value + f"Use the following context: {res}"
 
         response = await aclient.beta.chat.completions.parse(
-            model="gpt-4o-mini",  # or "gpt-3.5-turbo"
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided. If the conversation is over, supply a sentiment value of True and False if it's not over"},
                 {"role": "user", "content": context_message}
