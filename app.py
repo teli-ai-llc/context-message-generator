@@ -1,13 +1,12 @@
-import os, json, logging
 from config import Config
-from quart import Quart, request, jsonify
 from quart_cors import cors
-from werkzeug.utils import secure_filename
-import time
 from functools import wraps
+from pydantic import BaseModel
+import os, json, logging, time, dotenv
+from quart import Quart, request, jsonify
+from werkzeug.utils import secure_filename
 from modal import Image, App, Secret, asgi_app
 from openai import RateLimitError, OpenAIError
-from pydantic import BaseModel
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -248,14 +247,18 @@ async def get_gpt_response(value, res=None):
             response_format=Sentiment,
             max_tokens=16384
         )
-                # Access the parsed Sentiment object directly
+        # Access the parsed Sentiment object directly
         parsed_sentiment = response.choices[0].message.parsed
-        if isinstance(parsed_sentiment, Sentiment):
-            res = parsed_sentiment
-            logger.info("Response Generated Successfully!")
-            return res
-        else:
-            raise ValueError("Parsed content is not of type 'Sentiment'.")
+        token_usage = response.usage.dict()
+
+        res_dict = {
+            "response": parsed_sentiment.response,
+            "is_conversation_over": parsed_sentiment.is_conversation_over,
+            **token_usage
+        }
+
+        logger.info("Response Generated Successfully!")
+        return res_dict
 
     except RateLimitError as e:
         logger.info(f"Rate limit exceeded: {e}")
@@ -318,21 +321,21 @@ async def message_teli_data():
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
             gpt_response = await get_gpt_response(stringified)
-            if gpt_response.is_conversation_over == "True":
+            if gpt_response["is_conversation_over"] == "True":
                 logger.info(f"Conversation completed")
                 return jsonify({"response": "Conversation completed"}), 200
-            return jsonify({"response": gpt_response.response}), 200
+            return jsonify({"response": gpt_response["response"]}), 200
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
         gpt_response = await get_gpt_response(stringified, curr_response)
-        if gpt_response.is_conversation_over == "True":
+        if gpt_response["is_conversation_over"] == "True":
             logger.info(f"Conversation completed")
             return jsonify({"response": "Conversation completed"}), 200
-        return jsonify({"response": gpt_response.response}), 200
+        return jsonify({"response": gpt_response["response"]}), 200
 
     except Exception as e:
-        logger.info(f"HERE Error generating response: {e}")
+        logger.info(f"Error generating response: {e}")
         return jsonify({"error": str(e)}), 400
 
 @quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])

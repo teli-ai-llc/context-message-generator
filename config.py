@@ -1,5 +1,4 @@
-import os
-import time
+import os, time, logging
 from pinecone.grpc import PineconeGRPC as Pinecone
 from pinecone import ServerlessSpec
 from openai import AsyncOpenAI
@@ -7,6 +6,10 @@ from dotenv import load_dotenv
 
 # Load LOCAL environment variables from .env file
 load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Config:
     # Class-level attributes
@@ -58,9 +61,9 @@ class Config:
                 # Wait until the Pinecone index is ready
                 while not Config.pc.describe_index(Config.PINECONE_INDEX_NAME).status["ready"]:
                     time.sleep(1)
-                print(f"Index {Config.PINECONE_INDEX_NAME} created successfully!")
+                logger.info(f"Index {Config.PINECONE_INDEX_NAME} created successfully!")
             else:
-                print(f"Index {Config.PINECONE_INDEX_NAME} already exists.")
+                logger.info(f"Index {Config.PINECONE_INDEX_NAME} already exists.")
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Pinecone: {str(e)}")
@@ -71,4 +74,4 @@ class Config:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize OpenAI client: {str(e)}")
 
-        print("Config initialized successfully!")
+        logger.info("Config initialized successfully!")
