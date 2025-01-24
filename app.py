@@ -1,10 +1,12 @@
-import os, json, time
 from io import BytesIO
 from config import Config
 from quart_cors import cors
 from functools import wraps
+from pydantic import BaseModel
+import os, json, time, logging
 from quart import Quart, request, jsonify
-from redis import Redis, ConnectionPool, asyncio as aioredis
+from openai import RateLimitError, OpenAIError
+from redis import Redis, asyncio as aioredis
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
 from unstructured_ingest.v2.interfaces import ProcessorConfig
 from unstructured_ingest.v2.processes.connectors.local import (
@@ -26,14 +28,18 @@ quart_app.config["APP_CONFIG"] = Config()
 config_class = quart_app.config["APP_CONFIG"]
 config_class.initialize()
 
-# Configure Redis
 # Connection pooling for Redis
-pool = ConnectionPool.from_url(
+pool = aioredis.from_url(
     os.environ.get("REDIS_URL"),
     max_connections=500,  # Increased max connections for scalability
     socket_timeout=5  # Timeout in seconds
 )
 redis_client = Redis(connection_pool=pool)
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -65,6 +71,7 @@ async def get_from_redis(key):
     except Exception as e:
         raise RuntimeError(f"Failed to retrieve file from Redis: {str(e)}")
 
+
 async def delete_from_redis(key):
     try:
         redis_client.delete(key)
@@ -72,7 +79,7 @@ async def delete_from_redis(key):
         print(f"Failed to delete file from Redis: {str(e)}")
 
 
-def format_file_for_vectorizing(document_elements, context, unique_id):
+def format_file_for_vectorizing(document_elements, context):
     arr = []
     counter = 1
 
@@ -156,7 +163,7 @@ async def ingest_teli_data():
         context_arr = json.loads(context_str) if context_str else []
 
         # Format extracted data for vectorizing
-        context = format_file_for_vectorizing(document_elements, context_arr, unique_id)
+        context = format_file_for_vectorizing(document_elements, context_arr)
 
         # Handle embedding batch sizes to avoid memory issues and input size limits
         batch_size = 100
