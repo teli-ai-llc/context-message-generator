@@ -1,21 +1,15 @@
-import os, json
+import os, json, time
+from io import BytesIO
 from config import Config
-from quart import Quart, request, jsonify
 from quart_cors import cors
-from werkzeug.utils import secure_filename
-import time
 from functools import wraps
-from modal import Image, App, Secret, asgi_app
-from openai import RateLimitError, OpenAIError
-
-# Unstructured API imports
+from quart import Quart, request, jsonify
+from redis import Redis, ConnectionPool, asyncio as aioredis
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
 from unstructured_ingest.v2.interfaces import ProcessorConfig
 from unstructured_ingest.v2.processes.connectors.local import (
-    LocalIndexerConfig,
     LocalDownloaderConfig,
-    LocalConnectionConfig,
-    LocalUploaderConfig
+    LocalConnectionConfig
 )
 from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 
@@ -32,15 +26,14 @@ quart_app.config["APP_CONFIG"] = Config()
 config_class = quart_app.config["APP_CONFIG"]
 config_class.initialize()
 
-# Create a Modal App and Image with the required dependencies
-modal_app = App("context-message-generator")
-
-image = (
-    Image.debian_slim()
-    .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
+# Configure Redis
+# Connection pooling for Redis
+pool = ConnectionPool.from_url(
+    os.environ.get("REDIS_URL"),
+    max_connections=500,  # Increased max connections for scalability
+    socket_timeout=5  # Timeout in seconds
 )
-
-CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
+redis_client = Redis(connection_pool=pool)
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -52,24 +45,46 @@ def require_api_key(f):
             return await f(*args, **kwargs)
         else:
             return jsonify({"error": "Unauthorized"}), 401
-
     return decorated_function
 
-def format_file_for_vectorizing(file, context, endpoint):
-    arr = []
-    OUTPUT_DIR = config_class.OUTPUT_DIR
 
+async def save_to_redis(file, key, expiration=3600):
+    try:
+        file_data = await file.read()
+        redis_client.set(key, file_data, ex=expiration)  # Store with expiration
+    except Exception as e:
+        raise RuntimeError(f"Failed to save file to Redis: {str(e)}")
+
+
+async def get_from_redis(key):
+    try:
+        file_data = redis_client.get(key)
+        if not file_data:
+            raise RuntimeError("File not found in Redis or expired.")
+        return BytesIO(file_data)  # Return file as a BytesIO stream
+    except Exception as e:
+        raise RuntimeError(f"Failed to retrieve file from Redis: {str(e)}")
+
+async def delete_from_redis(key):
+    try:
+        redis_client.delete(key)
+    except Exception as e:
+        print(f"Failed to delete file from Redis: {str(e)}")
+
+
+def format_file_for_vectorizing(document_elements, context, unique_id):
+    arr = []
     counter = 1
 
-    if file:
-        with open(os.path.join(OUTPUT_DIR, f"{endpoint}.json"), "r") as f:
-            content = json.load(f)
-            arr.extend(
-                {"id": f"vec{counter + i}", "text": obj["text"]}
-                for i, obj in enumerate(content)
-            )
-        counter += len(content)
+    # Add extracted data to the array
+    if document_elements:
+        arr.extend(
+            {"id": f"vec{counter + i}", "text": element['text']}
+            for i, element in enumerate(document_elements)
+        )
+        counter += len(document_elements)
 
+    # Add additional context if provided
     if context:
         arr.extend(
             {"id": f"vec{counter + i}", "text": text}
@@ -85,66 +100,63 @@ async def ingest_teli_data():
         form_data = await request.form
         file_data = await request.files
 
-        if "unique_id" not in form_data and ("file" not in file_data or "context" not in file_data):
+        if "unique_id" not in form_data or "file" not in file_data:
             return jsonify({"error": "Missing required fields"}), 400
 
         # Get the Pinecone client and configuration details
-        pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
+        pc, pinecone_index_name = (
             config_class.pc,
-            config_class.INPUT_DIR,
-            config_class.OUTPUT_DIR,
             config_class.PINECONE_INDEX_NAME,
-            config_class.UNSTRUCTURED_API_KEY,
-            config_class.UNSTRUCTURED_API_URL,
         )
 
         unique_id = form_data.get("unique_id")
         context_str = form_data.get("context", "")
         file = file_data.get('file')
 
+        if not file:
+            return jsonify({"error": "No file provided"}), 400
+
+        # Secure the filename
+        filename = file.filename
+        redis_key = f"{unique_id}:{filename}"
+
+        # Validate file type
+        file_extension = os.path.splitext(filename)[1].lower()
+        if file_extension != ".pdf":
+            return jsonify({"error": "Unsupported file type"}), 400
+
+        # Save file to Redis
+        await save_to_redis(file, redis_key)
+
+        # Retrieve file from Redis for processing
+        file_stream = await get_from_redis(redis_key)
+
+        # Process the file using Unstructured
+        pipeline = Pipeline.from_configs(
+            context=ProcessorConfig(),
+            downloader_config=LocalDownloaderConfig(),
+            source_connection_config=LocalConnectionConfig(),
+            partitioner_config=PartitionerConfig(
+                partition_by_api=True,
+                api_key=os.environ.get("UNSTRUCTURED_API_KEY"),
+                partition_endpoint=os.environ.get("UNSTRUCTURED_API_URL"),
+                strategy="hi_res",
+                additional_partition_args={
+                    "split_pdf_page": True,
+                    "split_pdf_allow_failed": True,
+                    "split_pdf_concurrency_level": 15
+                }
+            ),
+        )
+
+        # Process in-memory file with Unstructured pipeline
+        document_elements = pipeline.run(file_stream=file_stream)
+
         # Parse context string
         context_arr = json.loads(context_str) if context_str else []
 
-        filename = file_extension = input_endpoint = input_file_path = None
-
-        if file:
-            # Secure the filename
-            filename = secure_filename(file.filename)
-            file_extension = os.path.splitext(filename)[1].lower()
-
-            if file_extension != ".pdf":
-                return jsonify({"error": "Unsupported file type"}), 400
-
-            # Save the uploaded file in the input directory in chunks
-            input_endpoint = f"{unique_id}-{filename}"
-            input_file_path = os.path.join(INPUT_DIR, input_endpoint)
-            with open(input_file_path, "wb") as f:
-                for chunk in iter(lambda: file.stream.read(CHUNK_SIZE), b""):
-                    f.write(chunk)
-
-            # Use the Unstructured Pipeline to process the file
-            Pipeline.from_configs(
-                context=ProcessorConfig(),
-                indexer_config=LocalIndexerConfig(input_path=INPUT_DIR),
-                downloader_config=LocalDownloaderConfig(),
-                source_connection_config=LocalConnectionConfig(),
-                partitioner_config=PartitionerConfig(
-                    partition_by_api=True,
-                    api_key=unstructured_api_key,
-                    partition_endpoint=unstructured_api_url,
-                    strategy="hi_res",
-                    additional_partition_args={
-                        "split_pdf_page": True,
-                        "split_pdf_allow_failed": True,
-                        "split_pdf_concurrency_level": 15
-                    }
-                ),
-                uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
-            ).run()
-            print("Pipeline ran successfully!")
-
-        # Read processed output files
-        context = format_file_for_vectorizing(file, context_arr, input_endpoint)
+        # Format extracted data for vectorizing
+        context = format_file_for_vectorizing(document_elements, context_arr, unique_id)
 
         # Handle embedding batch sizes to avoid memory issues and input size limits
         batch_size = 100
@@ -172,7 +184,7 @@ async def ingest_teli_data():
             for c, e in zip(context, embeddings)
         ]
 
-        # Upsert records in batches to avoid memory issues and input size limits
+        # Upsert data into Pinecone
         index = pc.Index(pinecone_index_name)
         namespace = f"{unique_id}-context"
         batch = []
@@ -186,32 +198,17 @@ async def ingest_teli_data():
         if batch:
             index.upsert(namespace=namespace, vectors=batch)
 
-        # IMPORTANT: Significantly slows down response time, but necessary for the data to be available for querying
+        # IMPORTANT: Significantly slows down response time, but necessary for the vectorizing process to complete
         time.sleep(10)
 
-        if file:
-            # Clean up input and output directories
-            if input_file_path and os.path.exists(input_file_path):
-                try:
-                    os.remove(input_file_path)
-                except Exception as e:
-                    print(f"Error deleting input file: {e}")
-
-            try:
-                output_files = [os.path.join(OUTPUT_DIR, file) for file in os.listdir(OUTPUT_DIR)]
-                for output_file in output_files:
-                    os.remove(output_file)
-            except FileNotFoundError:
-                print("No output files found")
-            except Exception as e:
-                print(f"Error reading output files: {e}")
-
-            print("Clean up successful!")
+        # Cleanup: Delete Redis key
+        await delete_from_redis(redis_key)
 
         return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
@@ -219,21 +216,29 @@ def namespace_exists(namespace_name):
     metadata = index.describe_index_stats().get("namespaces", {})
     return namespace_name in metadata
 
+
 # Get OpenAI GPT Response
 async def get_gpt_response(value, res=None):
     aclient = config_class.aclient
+
+    class Sentiment(BaseModel):
+        response: str
+        is_conversation_over: str
+
     try:
         context_message = value if res is None else value + f"Use the following context: {res}"
 
-        response = await aclient.chat.completions.create(
-            model="gpt-4o",  # or "gpt-3.5-turbo"
+        response = await aclient.beta.chat.completions.parse(
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided."},
+                {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided. If the conversation is over, supply a sentiment value of True and False if it's not over"},
                 {"role": "user", "content": context_message}
             ],
+            response_format=Sentiment,
             max_tokens=16384
         )
-        return response.choices[0].message.content
+
+        return {**response.choices[0].message.parsed.dict(), **response.usage.dict()}
     except RateLimitError as e:
         return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
     except OpenAIError as e:
@@ -253,7 +258,7 @@ async def message_teli_data():
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
-        stringified = str(message_history)
+        message_history = str(message_history)
 
         last_response = message_history[-1]["message"]
 
@@ -291,58 +296,17 @@ async def message_teli_data():
         threshold = 0.8
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
-            gpt_response = await get_gpt_response(stringified)
+            gpt_response = await get_gpt_response(message_history)
+            if gpt_response.response.is_conversation_over == "True":
+                return jsonify({"response": ""}), 200
             return jsonify({"response": gpt_response}), 200
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
-        gpt_response = await get_gpt_response(stringified, curr_response)
+        gpt_response = await get_gpt_response(message_history, curr_response)
+        if gpt_response.response.is_conversation_over == "True":
+            return jsonify({"response": ""}), 200
         return jsonify({"response": gpt_response}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
-@quart_app.route('/delete-namespace', methods=['DELETE'])
-@require_api_key
-async def delete_namespace():
-    try:
-        # Get the Pinecone client
-        pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
-
-        # Grab data from the request body
-        data = await request.json
-        if not data:
-            return {"error": "Empty or invalid JSON body"}, 400
-
-        unique_id = data.get("unique_id")
-
-        if not unique_id:
-            return {"error": "Missing required fields"}, 400
-
-        # Check if the namespace exists in the index
-        namespace = f"{unique_id}-context"
-        if not namespace_exists(namespace):
-            return {"error": "Namespace not found in the index"}, 400
-
-        # Delete the namespace from the index
-        index = pc.Index(pinecone_index_name)
-        index.delete(delete_all=True, namespace=namespace)
-
-        return jsonify({"message": "Namespace deleted successfully"}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-# For deployment with Modal
-@modal_app.function(
-    image=image,
-    secrets=[Secret.from_name("context-messenger-secrets")]
-)
-@asgi_app()
-def quart_asgi_app():
-    return quart_app
-
-# Local entrypoint for running the app
-@modal_app.local_entrypoint()
-def serve():
-    quart_app.run()
