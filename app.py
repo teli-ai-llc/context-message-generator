@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Semaphore to limit concurrency
-semaphore = asyncio.Semaphore(10)
+semaphore = asyncio.Semaphore(500)
 
 def get_api_key():
     return os.environ.get("API_KEY")
