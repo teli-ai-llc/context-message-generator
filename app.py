@@ -1,4 +1,4 @@
-import os, json
+import os, json, logging
 from config import Config
 from quart import Quart, request, jsonify
 from quart_cors import cors
@@ -41,6 +41,10 @@ image = (
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 def get_api_key():
     return os.environ.get("API_KEY")
 
@@ -75,6 +79,7 @@ def format_file_for_vectorizing(file, context, endpoint):
             for i, text in enumerate(context)
         )
 
+    logger.info(f"Formatted context for vectorizing")
     return arr
 
 @quart_app.route('/ingest-teli-data', methods=['POST'])
@@ -141,7 +146,7 @@ async def ingest_teli_data():
                 ),
                 uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
             ).run()
-            print("Pipeline ran successfully!")
+            logger.info("Pipeline ran successfully!")
 
         # Read processed output files
         context = format_file_for_vectorizing(file, context_arr, input_endpoint)
@@ -195,18 +200,20 @@ async def ingest_teli_data():
                 try:
                     os.remove(input_file_path)
                 except Exception as e:
-                    print(f"Error deleting input file: {e}")
+                    logger.info(f"Error deleting input file: {e}")
+                    return jsonify({"error": "Error deleting input file"}), 500
 
             try:
                 output_files = [os.path.join(OUTPUT_DIR, file) for file in os.listdir(OUTPUT_DIR)]
                 for output_file in output_files:
                     os.remove(output_file)
             except FileNotFoundError:
-                print("No output files found")
+                logger.info("No output files found")
+                return jsonify({"error": "No output files found"}), 500
             except Exception as e:
-                print(f"Error reading output files: {e}")
-
-            print("Clean up successful!")
+                logger.info(f"Error reading output files: {e}")
+                return jsonify({"error": f"Error reading output files: {e}"}), 500
+            logger.info("Clean up successful!")
 
         return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
 
@@ -241,12 +248,16 @@ async def get_gpt_response(value, res=None):
             max_tokens=16384
         )
 
+        logger.info(f"Response Generated Successfully!")
         return {**response.choices[0].message.parsed.dict(), **response.usage.dict()}
     except RateLimitError as e:
+        logger.info(f"Rate limit exceeded: {e}")
         return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
     except OpenAIError as e:
+        logger.info(f"OpenAI API error: {e}")
         return jsonify({"openai error": "OpenAI API error: " + str(e)}), 500
     except Exception as e:
+        logger.info(f"Error generating response: {e}")
         return jsonify({"openai error": str(e)}), 400
 
 @quart_app.route('/message-teli-data', methods=['POST'])
@@ -301,6 +312,7 @@ async def message_teli_data():
         if curr_threshold < threshold:
             gpt_response = await get_gpt_response(message_history)
             if gpt_response.response.is_conversation_over == "True":
+                logger.info(f"Conversation completed")
                 return jsonify({"response": ""}), 200
             return jsonify({"response": gpt_response}), 200
 
@@ -308,10 +320,12 @@ async def message_teli_data():
         curr_response = response.matches[0].metadata.get('text', '')
         gpt_response = await get_gpt_response(message_history, curr_response)
         if gpt_response.response.is_conversation_over == "True":
+            logger.info(f"Conversation completed")
             return jsonify({"response": ""}), 200
         return jsonify({"response": gpt_response}), 200
 
     except Exception as e:
+        logger.info(f"Error generating response: {e}")
         return jsonify({"error": str(e)}), 400
 
 @quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])
@@ -336,6 +350,7 @@ async def delete_namespace(unique_id):
         return jsonify({"message": "Namespace deleted successfully"}), 200
 
     except Exception as e:
+        logger.info(f"Error deleting namespace: {e}")
         return jsonify({"error": str(e)}), 400
 
 # For deployment with Modal
