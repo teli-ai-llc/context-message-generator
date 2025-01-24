@@ -35,6 +35,7 @@ semaphore = asyncio.Semaphore(10)
 def get_api_key():
     return os.environ.get("API_KEY")
 
+
 def require_api_key(f):
     @wraps(f)
     async def decorated_function(*args, **kwargs):
@@ -44,9 +45,11 @@ def require_api_key(f):
             return jsonify({"error": "Unauthorized"}), 401
     return decorated_function
 
+
 async def process_with_limit(func, *args, **kwargs):
     async with semaphore:
         return await func(*args, **kwargs)
+
 
 @quart_app.route('/ingest-teli-data', methods=['POST'])
 @require_api_key
@@ -117,6 +120,7 @@ async def process_pipeline(unique_id, file_content):
 
     # Process the file
     pipeline.run(source=BytesIO(file_content), destination=destination)
+
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
