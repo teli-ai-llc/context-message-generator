@@ -1,8 +1,8 @@
-import os, logging
 from io import BytesIO
 from config import Config
 from quart_cors import cors
 from functools import wraps
+import os, logging, asyncio
 from pydantic import BaseModel
 from quart import Quart, request, jsonify
 from openai import RateLimitError, OpenAIError
@@ -10,8 +10,8 @@ from unstructured_ingest.v2.pipeline.pipeline import Pipeline
 from unstructured_ingest.v2.interfaces import ProcessorConfig
 from unstructured_ingest.v2.processes.embedder import EmbedderConfig
 from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
+from unstructured_ingest.v2.processes.chunker import ChunkerConfig
 from unstructured_ingest.connector.pinecone import PineconeDestination, PineconeConfig
-
 
 quart_app = Quart(__name__)
 quart_app = cors(
@@ -26,10 +26,11 @@ quart_app.config["APP_CONFIG"] = Config()
 config_class = quart_app.config["APP_CONFIG"]
 config_class.initialize()
 
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Semaphore to limit concurrency
+semaphore = asyncio.Semaphore(10)
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -43,6 +44,9 @@ def require_api_key(f):
             return jsonify({"error": "Unauthorized"}), 401
     return decorated_function
 
+async def process_with_limit(func, *args, **kwargs):
+    async with semaphore:
+        return await func(*args, **kwargs)
 
 @quart_app.route('/ingest-teli-data', methods=['POST'])
 @require_api_key
@@ -57,7 +61,6 @@ async def ingest_teli_data():
         unique_id = form_data.get("unique_id")
         file = file_data.get('file')
 
-
         if not file:
             return jsonify({"error": "No file provided"}), 400
 
@@ -65,46 +68,55 @@ async def ingest_teli_data():
         if file_extension != ".pdf":
             return jsonify({"error": "Unsupported file type"}), 400
 
-        file_stream = BytesIO(await file.read())
+        file_content = await file.read()
 
-        # Configure the pipeline
-        pipeline = Pipeline.from_configs(
-            context=ProcessorConfig(),
-            partitioner_config=PartitionerConfig(
-                partition_by_api=True,
-                api_key=os.environ.get("UNSTRUCTURED_API_KEY"),
-                partition_endpoint=os.environ.get("UNSTRUCTURED_API_URL"),
-                strategy="hi_res",
-                additional_partition_args={
-                    "split_pdf_page": True,
-                    "split_pdf_allow_failed": True,
-                    "split_pdf_concurrency_level": 15,
-                },
-            ),
-            embedder_config=EmbedderConfig(
-                embed_by_api=True,
-                api_key=os.environ.get("OPENAI_API_KEY"),
-                embed_endpoint="https://api.openai.com/v1/embeddings",
-                model_name="multilingual-e5-large",
-            ),
-        )
+        # Process the file with concurrency control
+        await process_with_limit(process_pipeline, unique_id, file_content)
 
-        # Configure Pinecone destination
-        pinecone_config = PineconeConfig(
-            api_key=os.environ.get("PINECONE_API_KEY"),
-            index_name=os.environ.get("PINECONE_INDEX_NAME"),
-            namespace=f"{unique_id}-context",
-        )
-        destination = PineconeDestination(config=pinecone_config)
-
-        # Process the file
-        pipeline.run(source=BytesIO(file_stream.read()), destination=destination)
-
-        return jsonify({"message": "Pipeline completed successfully."}), 200
+        return jsonify({"message": "File processed successfully."}), 200
 
     except Exception as e:
         logger.error(f"Error processing the file: {e}")
         return jsonify({"error": str(e)}), 500
+
+async def process_pipeline(unique_id, file_content):
+    # Configure the pipeline
+    pipeline = Pipeline.from_configs(
+        context=ProcessorConfig(),
+        partitioner_config=PartitionerConfig(
+            partition_by_api=True,
+            api_key=os.environ.get("UNSTRUCTURED_API_KEY"),
+            partition_endpoint=os.environ.get("UNSTRUCTURED_API_URL"),
+            strategy="hi_res",
+            additional_partition_args={
+                "split_pdf_page": True,
+                "split_pdf_allow_failed": True,
+                "split_pdf_concurrency_level": 15,
+            },
+        ),
+        embedder_config=EmbedderConfig(
+            embed_by_api=True,
+            api_key=os.environ.get("EMBEDDING_API_KEY"),
+            embed_endpoint=os.environ.get("EMBEDDING_API_URL"),
+            model_name="text-embedding-ada-002",
+        ),
+        chunker_config=ChunkerConfig(
+            chunking_strategy="by_title",
+            max_characters=1000,
+            overlap=50,
+        ),
+    )
+
+    # Configure Pinecone destination
+    pinecone_config = PineconeConfig(
+        api_key=os.environ.get("PINECONE_API_KEY"),
+        index_name=os.environ.get("PINECONE_INDEX_NAME"),
+        namespace=f"{unique_id}-namespace"
+    )
+    destination = PineconeDestination(config=pinecone_config)
+
+    # Process the file
+    pipeline.run(source=BytesIO(file_content), destination=destination)
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
