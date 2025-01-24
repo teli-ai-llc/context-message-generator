@@ -1,19 +1,17 @@
+import os, logging
 from io import BytesIO
 from config import Config
 from quart_cors import cors
 from functools import wraps
 from pydantic import BaseModel
-import os, json, time, logging
 from quart import Quart, request, jsonify
 from openai import RateLimitError, OpenAIError
-from redis import Redis, asyncio as aioredis
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
 from unstructured_ingest.v2.interfaces import ProcessorConfig
-from unstructured_ingest.v2.processes.connectors.local import (
-    LocalDownloaderConfig,
-    LocalConnectionConfig
-)
+from unstructured_ingest.v2.processes.embedder import EmbedderConfig
 from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
+from unstructured_ingest.connector.pinecone import PineconeDestination, PineconeConfig
+
 
 quart_app = Quart(__name__)
 quart_app = cors(
@@ -27,14 +25,6 @@ quart_app = cors(
 quart_app.config["APP_CONFIG"] = Config()
 config_class = quart_app.config["APP_CONFIG"]
 config_class.initialize()
-
-# Connection pooling for Redis
-pool = aioredis.from_url(
-    os.environ.get("REDIS_URL"),
-    max_connections=500,  # Increased max connections for scalability
-    socket_timeout=5  # Timeout in seconds
-)
-redis_client = Redis(connection_pool=pool)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -54,52 +44,6 @@ def require_api_key(f):
     return decorated_function
 
 
-async def save_to_redis(file, key, expiration=3600):
-    try:
-        file_data = await file.read()
-        redis_client.set(key, file_data, ex=expiration)  # Store with expiration
-    except Exception as e:
-        raise RuntimeError(f"Failed to save file to Redis: {str(e)}")
-
-
-async def get_from_redis(key):
-    try:
-        file_data = redis_client.get(key)
-        if not file_data:
-            raise RuntimeError("File not found in Redis or expired.")
-        return BytesIO(file_data)  # Return file as a BytesIO stream
-    except Exception as e:
-        raise RuntimeError(f"Failed to retrieve file from Redis: {str(e)}")
-
-
-async def delete_from_redis(key):
-    try:
-        redis_client.delete(key)
-    except Exception as e:
-        print(f"Failed to delete file from Redis: {str(e)}")
-
-
-def format_file_for_vectorizing(document_elements, context):
-    arr = []
-    counter = 1
-
-    # Add extracted data to the array
-    if document_elements:
-        arr.extend(
-            {"id": f"vec{counter + i}", "text": element['text']}
-            for i, element in enumerate(document_elements)
-        )
-        counter += len(document_elements)
-
-    # Add additional context if provided
-    if context:
-        arr.extend(
-            {"id": f"vec{counter + i}", "text": text}
-            for i, text in enumerate(context)
-        )
-
-    return arr
-
 @quart_app.route('/ingest-teli-data', methods=['POST'])
 @require_api_key
 async def ingest_teli_data():
@@ -110,39 +54,22 @@ async def ingest_teli_data():
         if "unique_id" not in form_data or "file" not in file_data:
             return jsonify({"error": "Missing required fields"}), 400
 
-        # Get the Pinecone client and configuration details
-        pc, pinecone_index_name = (
-            config_class.pc,
-            config_class.PINECONE_INDEX_NAME,
-        )
-
         unique_id = form_data.get("unique_id")
-        context_str = form_data.get("context", "")
         file = file_data.get('file')
+
 
         if not file:
             return jsonify({"error": "No file provided"}), 400
 
-        # Secure the filename
-        filename = file.filename
-        redis_key = f"{unique_id}:{filename}"
-
-        # Validate file type
-        file_extension = os.path.splitext(filename)[1].lower()
+        file_extension = os.path.splitext(file.filename)[1].lower()
         if file_extension != ".pdf":
             return jsonify({"error": "Unsupported file type"}), 400
 
-        # Save file to Redis
-        await save_to_redis(file, redis_key)
+        file_stream = BytesIO(await file.read())
 
-        # Retrieve file from Redis for processing
-        file_stream = await get_from_redis(redis_key)
-
-        # Process the file using Unstructured
+        # Configure the pipeline
         pipeline = Pipeline.from_configs(
             context=ProcessorConfig(),
-            downloader_config=LocalDownloaderConfig(),
-            source_connection_config=LocalConnectionConfig(),
             partitioner_config=PartitionerConfig(
                 partition_by_api=True,
                 api_key=os.environ.get("UNSTRUCTURED_API_KEY"),
@@ -151,71 +78,33 @@ async def ingest_teli_data():
                 additional_partition_args={
                     "split_pdf_page": True,
                     "split_pdf_allow_failed": True,
-                    "split_pdf_concurrency_level": 15
-                }
+                    "split_pdf_concurrency_level": 15,
+                },
+            ),
+            embedder_config=EmbedderConfig(
+                embed_by_api=True,
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                embed_endpoint="https://api.openai.com/v1/embeddings",
+                model_name="multilingual-e5-large",
             ),
         )
 
-        # Process in-memory file with Unstructured pipeline
-        document_elements = pipeline.run(file_stream=file_stream)
+        # Configure Pinecone destination
+        pinecone_config = PineconeConfig(
+            api_key=os.environ.get("PINECONE_API_KEY"),
+            index_name=os.environ.get("PINECONE_INDEX_NAME"),
+            namespace=f"{unique_id}-context",
+        )
+        destination = PineconeDestination(config=pinecone_config)
 
-        # Parse context string
-        context_arr = json.loads(context_str) if context_str else []
+        # Process the file
+        pipeline.run(source=BytesIO(file_stream.read()), destination=destination)
 
-        # Format extracted data for vectorizing
-        context = format_file_for_vectorizing(document_elements, context_arr)
-
-        # Handle embedding batch sizes to avoid memory issues and input size limits
-        batch_size = 100
-        text_inputs = [c['text'] for c in context]
-        embeddings = []
-        for i in range(0, len(text_inputs), batch_size):
-            batch = text_inputs[i:i + batch_size]
-            batch_embeddings = pc.inference.embed(
-                model="multilingual-e5-large",
-                inputs=batch,
-                parameters={
-                    "input_type": "passage",
-                    "truncate": "END",
-                },
-            )
-            embeddings.extend(batch_embeddings)
-
-        # Prepare the records
-        records = [
-            {
-                "id": c['id'],
-                "values": e['values'],
-                "metadata": {"text": c['text']}
-            }
-            for c, e in zip(context, embeddings)
-        ]
-
-        # Upsert data into Pinecone
-        index = pc.Index(pinecone_index_name)
-        namespace = f"{unique_id}-context"
-        batch = []
-        for record in records:
-            batch.append(record)
-            if len(batch) == batch_size:
-                index.upsert(namespace=namespace, vectors=batch)
-                batch.clear()
-
-        # Upsert leftover records
-        if batch:
-            index.upsert(namespace=namespace, vectors=batch)
-
-        # IMPORTANT: Significantly slows down response time, but necessary for the vectorizing process to complete
-        time.sleep(10)
-
-        # Cleanup: Delete Redis key
-        await delete_from_redis(redis_key)
-
-        return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
+        return jsonify({"message": "Pipeline completed successfully."}), 200
 
     except Exception as e:
+        logger.error(f"Error processing the file: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 # Function to check if a namespace exists in a given index
 def namespace_exists(namespace_name):
