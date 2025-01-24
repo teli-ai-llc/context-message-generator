@@ -218,6 +218,7 @@ async def ingest_teli_data():
         return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
 
     except Exception as e:
+        logger.info(f"Error ingesting data: {e}")
         return jsonify({"error": str(e)}), 500
 
 # Function to check if a namespace exists in a given index
@@ -247,9 +248,15 @@ async def get_gpt_response(value, res=None):
             response_format=Sentiment,
             max_tokens=16384
         )
+                # Access the parsed Sentiment object directly
+        parsed_sentiment = response.choices[0].message.parsed
+        if isinstance(parsed_sentiment, Sentiment):
+            res = parsed_sentiment
+            logger.info("Response Generated Successfully!")
+            return res
+        else:
+            raise ValueError("Parsed content is not of type 'Sentiment'.")
 
-        logger.info(f"Response Generated Successfully!")
-        return {**response.choices[0].message.parsed.dict(), **response.usage.dict()}
     except RateLimitError as e:
         logger.info(f"Rate limit exceeded: {e}")
         return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
@@ -272,7 +279,7 @@ async def message_teli_data():
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
-        message_history = str(message_history)
+        stringified = str(message_history)
 
         last_response = message_history[-1]["message"]
 
@@ -310,22 +317,22 @@ async def message_teli_data():
         threshold = 0.8
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
-            gpt_response = await get_gpt_response(message_history)
-            if gpt_response.response.is_conversation_over == "True":
+            gpt_response = await get_gpt_response(stringified)
+            if gpt_response.is_conversation_over == "True":
                 logger.info(f"Conversation completed")
-                return jsonify({"response": ""}), 200
-            return jsonify({"response": gpt_response}), 200
+                return jsonify({"response": "Conversation completed"}), 200
+            return jsonify({"response": gpt_response.response}), 200
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
-        gpt_response = await get_gpt_response(message_history, curr_response)
-        if gpt_response.response.is_conversation_over == "True":
+        gpt_response = await get_gpt_response(stringified, curr_response)
+        if gpt_response.is_conversation_over == "True":
             logger.info(f"Conversation completed")
-            return jsonify({"response": ""}), 200
-        return jsonify({"response": gpt_response}), 200
+            return jsonify({"response": "Conversation completed"}), 200
+        return jsonify({"response": gpt_response.response}), 200
 
     except Exception as e:
-        logger.info(f"Error generating response: {e}")
+        logger.info(f"HERE Error generating response: {e}")
         return jsonify({"error": str(e)}), 400
 
 @quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])
