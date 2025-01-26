@@ -2,6 +2,7 @@ from config import Config
 from quart_cors import cors
 from functools import wraps
 from pydantic import BaseModel
+from dynamodb.message_history import MessageHistory
 import os, json, logging, time, dotenv
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
@@ -39,6 +40,9 @@ image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
+
+# Initialize the message history
+message_history = MessageHistory()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -228,47 +232,47 @@ def namespace_exists(namespace_name):
 
 
 # Get OpenAI GPT Response
-async def get_gpt_response(value, res=None):
-    aclient = config_class.aclient
+# async def get_gpt_response(value, res=None):
+#     aclient = config_class.aclient
 
-    class Sentiment(BaseModel):
-        response: str
-        is_conversation_over: str
+#     class Sentiment(BaseModel):
+#         response: str
+#         is_conversation_over: str
 
-    try:
-        context_message = value if res is None else value + f"Use the following context: {res}"
+#     try:
+#         context_message = value if res is None else value + f"Use the following context: {res}"
 
-        response = await aclient.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided. If the conversation is over, supply a sentiment value of True and False if it's not over"},
-                {"role": "user", "content": context_message}
-            ],
-            response_format=Sentiment,
-            max_tokens=16384
-        )
-        # Access the parsed Sentiment object directly
-        parsed_sentiment = response.choices[0].message.parsed
-        token_usage = response.usage.dict()
+#         response = await aclient.beta.chat.completions.parse(
+#             model="gpt-4o-mini",
+#             messages=[
+#                 {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided."},
+#                 {"role": "user", "content": context_message}
+#             ],
+#             response_format=Sentiment,
+#             max_tokens=16384
+#         )
+#         # Access the parsed Sentiment object directly
+#         parsed_sentiment = response.choices[0].message.parsed
+#         token_usage = response.usage.dict()
 
-        res_dict = {
-            "response": parsed_sentiment.response,
-            "is_conversation_over": parsed_sentiment.is_conversation_over,
-            **token_usage
-        }
+#         res_dict = {
+#             "response": parsed_sentiment.response,
+#             "is_conversation_over": parsed_sentiment.is_conversation_over,
+#             **token_usage
+#         }
 
-        logger.info("Response Generated Successfully!")
-        return res_dict
+#         logger.info("Response Generated Successfully!")
+#         return res_dict
 
-    except RateLimitError as e:
-        logger.info(f"Rate limit exceeded: {e}")
-        return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
-    except OpenAIError as e:
-        logger.info(f"OpenAI API error: {e}")
-        return jsonify({"openai error": "OpenAI API error: " + str(e)}), 500
-    except Exception as e:
-        logger.info(f"Error generating response: {e}")
-        return jsonify({"openai error": str(e)}), 400
+#     except RateLimitError as e:
+#         logger.info(f"Rate limit exceeded: {e}")
+#         return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
+#     except OpenAIError as e:
+#         logger.info(f"OpenAI API error: {e}")
+#         return jsonify({"openai error": "OpenAI API error: " + str(e)}), 500
+#     except Exception as e:
+#         logger.info(f"Error generating response: {e}")
+#         return jsonify({"openai error": str(e)}), 400
 
 @quart_app.route('/message-teli-data', methods=['POST'])
 @require_api_key
@@ -281,24 +285,27 @@ async def message_teli_data():
         pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
         unique_id = data.get("unique_id")
-        message_history = data.get("message_history")
-        stringified = str(message_history)
+        message = data.get("message")
+        # message_history = data.get("message_history")
+        # stringified = str(message_history)
 
-        last_response = message_history[-1]["message"]
+        # last_response = message_history[-1]["message"]
 
-        if not all([unique_id, message_history]):
+        if not all([unique_id, message]):
             return {"error": "Missing required fields"}, 400
 
         # Check if the namespace exists in the index
         namespace = f"{unique_id}-context"
         if not namespace_exists(namespace):
+            logger.info(f"Namespace {namespace} does not exist")
             return {"error": "Namespace not found in the index"}, 400
 
 
         # Convert the last_response into a numerical vector that Pinecone can search with
         query_embedding = pc.inference.embed(
             model="multilingual-e5-large",
-            inputs=[last_response],
+            # inputs=[last_response],
+            inputs=[message],
             parameters={
                 "input_type": "query"
             }
@@ -320,7 +327,9 @@ async def message_teli_data():
         threshold = 0.8
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
-            gpt_response = await get_gpt_response(stringified)
+            # gpt_response = await get_gpt_response(stringified)
+            # gpt_response = await get_gpt_response(message)
+            gpt_response = await message_history.get_gpt_response(message, namespace)
             if gpt_response["is_conversation_over"] == "True":
                 logger.info(f"Conversation completed")
                 return jsonify({"response": "Conversation completed"}), 200
@@ -328,10 +337,12 @@ async def message_teli_data():
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
-        gpt_response = await get_gpt_response(stringified, curr_response)
+        # gpt_response = await get_gpt_response(stringified, curr_response)
+        gpt_response = await message_history.get_gpt_response(message, namespace, curr_response)
         if gpt_response["is_conversation_over"] == "True":
             logger.info(f"Conversation completed")
             return jsonify({"response": "Conversation completed"}), 200
+        print(message_history.get(namespace))
         return jsonify({"response": gpt_response["response"]}), 200
 
     except Exception as e:
