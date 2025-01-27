@@ -190,8 +190,13 @@ async def ingest_teli_data():
         if batch:
             index.upsert(namespace=namespace, vectors=batch)
 
-        # IMPORTANT: Significantly slows down response time, but necessary for the vectorizing process to complete
-        time.sleep(10)
+        # Wait for the index to update
+        while True:
+            stats = index.describe_index_stats()
+            current_vector_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
+            if current_vector_count >= len(records):
+                break
+            time.sleep(1)  # Wait and re-check periodically
 
         if file:
             # Clean up input and output directories
