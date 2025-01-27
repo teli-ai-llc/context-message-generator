@@ -2,7 +2,7 @@ import logging
 from quart import jsonify
 from config import Config
 from pydantic import BaseModel
-from dynamodb import get_dynamo_table
+from repository import get_dynamo_table
 from botocore.exceptions import ClientError
 from openai import OpenAIError, RateLimitError
 
@@ -70,10 +70,13 @@ class MessageHistory:
 
         class Sentiment(BaseModel):
             response: str
-            is_conversation_over: str
+            is_conversation_over: bool
+            should_human_takeover: bool
 
         try:
-            context_message = message if res is None else message + f"Use the following context: {res}"
+            message_history = self.get(namespace)
+            new_message_history = [*message_history, {"role": "user", "message": message}]
+            context_message = str(new_message_history) if res is None else str(new_message_history) + f"Use the following context: {res}"
 
             response = await aclient.beta.chat.completions.parse(
                 model="gpt-4o-mini",
@@ -92,6 +95,7 @@ class MessageHistory:
             res_dict = {
                 "response": parsed_sentiment.response,
                 "is_conversation_over": parsed_sentiment.is_conversation_over,
+                "should_human_takeover": parsed_sentiment.should_human_takeover,
                 **token_usage
             }
 
