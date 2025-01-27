@@ -320,6 +320,7 @@ async def delete_namespace(unique_id):
         # Delete the namespace from the index
         index = pc.Index(pinecone_index_name)
         index.delete(delete_all=True, namespace=namespace)
+        message_history.delete(namespace)
 
         return jsonify({"message": "Namespace deleted successfully"}), 200
 

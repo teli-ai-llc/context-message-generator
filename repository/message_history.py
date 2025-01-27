@@ -113,6 +113,15 @@ class MessageHistory:
             logger.info(f"Error generating response: {e}")
             return jsonify({"openai error": str(e)}), 400
 
+    def delete_namespace(self, namespace):
+        try:
+            self.table.delete_item(Key={"namespace": namespace})
+            logging.info(f"Message history for user {namespace} deleted successfully.")
+            return jsonify({"message": "Message history deleted successfully."}), 200
+        except ClientError as e:
+            logging.error(f"Failed to delete message history for user {namespace}: {e}")
+            return jsonify({"error": "Failed to delete message history for user."}), 500
+
     def batch_save(self, histories):
         try:
             with self.table.batch_writer() as batch:
