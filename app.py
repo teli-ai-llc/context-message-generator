@@ -1,7 +1,7 @@
 from config import Config
 from quart_cors import cors
 from functools import wraps
-from repository.message_history import MessageHistory
+from repository.message_history_nine9 import MessageHistoryNine9
 import os, json, logging, time, dotenv
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
@@ -32,8 +32,8 @@ config_class = quart_app.config["APP_CONFIG"]
 config_class.initialize()
 
 # Create a Modal App and Network File System
-modal_app = App("context-message-generator")
-network_file_system = NetworkFileSystem.from_name("context-message-generator-nfs", create_if_missing=True)
+modal_app = App("context-message-generator-nine9")
+network_file_system = NetworkFileSystem.from_name("context-message-generator-nine9-nfs", create_if_missing=True)
 
 image = (
     Image.debian_slim()
@@ -41,7 +41,7 @@ image = (
 )
 
 # Initialize the message history
-message_history = MessageHistory()
+message_history = MessageHistoryNine9()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -87,7 +87,7 @@ def format_file_for_vectorizing(file, context, endpoint):
 @modal_app.function(
     network_file_systems={"/uploads": network_file_system},
     image=image,
-    secrets=[Secret.from_name("context-messenger-secrets")]
+    secrets=[Secret.from_name("context-messenger-nine9-secrets")]
 )
 def vectorize(unique_id, context_str, file_data):
     try:
@@ -340,7 +340,7 @@ async def delete_namespace(unique_id):
 # For deployment with Modal
 @modal_app.function(
     image=image,
-    secrets=[Secret.from_name("context-messenger-secrets")]
+    secrets=[Secret.from_name("context-messenger-nine9-secrets")]
 )
 @asgi_app()
 def quart_asgi_app():
