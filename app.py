@@ -5,7 +5,7 @@ from repository.message_history import MessageHistory
 import os, json, logging, time, dotenv
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
-from modal import Image, App, Secret, asgi_app
+from modal import Image, App, Secret, asgi_app, NetworkFileSystem
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -31,8 +31,9 @@ quart_app.config["APP_CONFIG"] = Config()
 config_class = quart_app.config["APP_CONFIG"]
 config_class.initialize()
 
-# Create a Modal App and Image with the required dependencies
+# Create a Modal App and Network File System
 modal_app = App("context-message-generator")
+network_file_system = NetworkFileSystem.from_name("context-message-generator-nfs", create_if_missing=True)
 
 image = (
     Image.debian_slim()
@@ -83,16 +84,13 @@ def format_file_for_vectorizing(file, context, endpoint):
     logger.info(f"Formatted context for vectorizing")
     return arr
 
-@quart_app.route('/ingest-teli-data', methods=['POST'])
-@require_api_key
-async def ingest_teli_data():
+@modal_app.function(
+    network_file_systems={"/uploads": network_file_system},
+    image=image,
+    secrets=[Secret.from_name("context-messenger-secrets")]
+)
+def vectorize(unique_id, context_str, file_data):
     try:
-        form_data = await request.form
-        file_data = await request.files
-
-        if "unique_id" not in form_data and ("file" not in file_data or "context" not in file_data):
-            return jsonify({"error": "Missing required fields"}), 400
-
         # Get the Pinecone client and configuration details
         pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
             config_class.pc,
@@ -103,18 +101,15 @@ async def ingest_teli_data():
             config_class.UNSTRUCTURED_API_URL,
         )
 
-        unique_id = form_data.get("unique_id")
-        context_str = form_data.get("context", "")
-        file = file_data.get("file")
-
-        # Parse context string
         context_arr = json.loads(context_str) if context_str else []
+        filename = file_data['filename']
+        file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
 
-        filename = file_extension = input_endpoint = input_file_path = None
+        input_endpoint = f"{unique_id}-{filename}"
+        input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
-        if file:
-            # Secure the filename
-            filename = secure_filename(file.filename)
+        if file_data:
+            # Save the uploaded file in the input directory
             file_extension = os.path.splitext(filename)[1].lower()
 
             if file_extension != ".pdf":
@@ -123,10 +118,9 @@ async def ingest_teli_data():
             # Save the uploaded file in the input directory in chunks
             input_endpoint = f"{unique_id}-{filename}"
             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
-            CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB per chunk
+
             with open(input_file_path, "wb") as f:
-                for chunk in iter(lambda: file.stream.read(CHUNK_SIZE), b""):
-                    f.write(chunk)
+                f.write(file_content)
 
             # Use the Unstructured Pipeline to process the file
             Pipeline.from_configs(
@@ -150,7 +144,7 @@ async def ingest_teli_data():
             logger.info("Pipeline ran successfully!")
 
         # Read processed output files
-        context = format_file_for_vectorizing(file, context_arr, input_endpoint)
+        context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
 
         # Handle embedding batch sizes to avoid memory issues and input size limits
         batch_size = 100
@@ -170,27 +164,15 @@ async def ingest_teli_data():
 
         # Prepare the records
         records = [
-            {
-                "id": c['id'],
-                "values": e['values'],
-                "metadata": {"text": c['text']}
-            }
+            {"id": c['id'], "values": e['values'], "metadata": {"text": c['text']}}
             for c, e in zip(context, embeddings)
         ]
 
         # Upsert records in batches to avoid memory issues and input size limits
         index = pc.Index(pinecone_index_name)
         namespace = f"{unique_id}-context"
-        batch = []
-        for record in records:
-            batch.append(record)
-            if len(batch) == batch_size:
-                index.upsert(namespace=namespace, vectors=batch)
-                batch.clear()
-
-        # Upsert leftover records
-        if batch:
-            index.upsert(namespace=namespace, vectors=batch)
+        for i in range(0, len(records), batch_size):
+            index.upsert(namespace=namespace, vectors=records[i : i + batch_size])
 
         # Wait for the index to update
         while True:
@@ -200,31 +182,58 @@ async def ingest_teli_data():
                 break
             time.sleep(1)  # Wait and re-check periodically
 
-        if file:
-            # Clean up input and output directories
-            if input_file_path and os.path.exists(input_file_path):
-                try:
-                    os.remove(input_file_path)
-                except Exception as e:
-                    logger.info(f"Error deleting input file: {e}")
-                    return jsonify({"error": "Error deleting input file"}), 500
-
+        if file_data:
             try:
-                output_files = [os.path.join(OUTPUT_DIR, file) for file in os.listdir(OUTPUT_DIR)]
-                for output_file in output_files:
-                    os.remove(output_file)
-            except FileNotFoundError:
-                logger.info("No output files found")
-                return jsonify({"error": "No output files found"}), 500
-            except Exception as e:
-                logger.info(f"Error reading output files: {e}")
-                return jsonify({"error": f"Error reading output files: {e}"}), 500
-            logger.info("Clean up successful!")
+                os.remove(input_file_path)
+                logger.info(f"Input file {input_file_path} deleted successfully.")
 
-        return jsonify({"message": "Pinecone ingested successfully!", "context": context}), 200
+                for output_file in os.listdir(OUTPUT_DIR):
+                    os.remove(os.path.join(OUTPUT_DIR, output_file))
+                    logger.info("Output directory cleaned successfully.")
+            except Exception as e:
+                logger.error(f"Error deleting input file: {e}")
+                return {"error": "Error deleting input file"}
+
+        logger.info("Pinecone ingestion completed successfully!")
+        return {"message": "Pinecone ingested successfully!", "context": context}
 
     except Exception as e:
         logger.info(f"Error ingesting data: {e}")
+        return {"error": str(e)}
+
+@quart_app.route('/ingest-teli-data', methods=['POST'])
+@require_api_key
+async def ingest_teli_data():
+    try:
+        # Extract form data and file
+        form_data = await request.form
+        file_data = await request.files
+
+        if "unique_id" not in form_data or "file" not in file_data:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        unique_id = form_data.get("unique_id")
+        context_str = form_data.get("context", "")
+        file = file_data.get("file")
+
+        # Serialize file data
+        file_content = file.read()  # Read the file as bytes
+        serialized_file = {
+            "filename": secure_filename(file.filename),
+            "content": file_content.decode("latin1"),  # Encode bytes to string for transmission
+        }
+
+        # Call the Modal function
+        result = vectorize.remote(unique_id, context_str, serialized_file)
+
+        if "error" in result:
+            logger.info(f"Error in Quart endpoint: {result['error']}")
+            return jsonify(result), 400
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Error in Quart endpoint: {e}")
         return jsonify({"error": str(e)}), 500
 
 # Function to check if a namespace exists in a given index
