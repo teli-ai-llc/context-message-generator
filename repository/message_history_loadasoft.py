@@ -10,9 +10,9 @@ from openai import OpenAIError, RateLimitError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class MessageHistory:
+class MessageHistoryLoadasoft:
     def __init__(self):
-        self.table_name = "message_history"
+        self.table_name = "message_history_loadasoft"
         self.table = get_dynamo_table(self.table_name)
 
     def get(self, namespace):

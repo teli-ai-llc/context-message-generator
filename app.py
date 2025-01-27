@@ -1,7 +1,7 @@
 from config import Config
 from quart_cors import cors
 from functools import wraps
-from repository.message_history import MessageHistory
+from loadasoft.repository.message_history_loadasoft import MessageHistoryLoadasoft
 import os, json, logging, time, dotenv
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
@@ -41,7 +41,7 @@ image = (
 )
 
 # Initialize the message history
-message_history = MessageHistory()
+message_history = MessageHistoryLoadasoft()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
