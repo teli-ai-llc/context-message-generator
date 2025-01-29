@@ -1,10 +1,11 @@
 from config import Config
 from quart_cors import cors
 from functools import wraps
-from repository.message_history_loadasoft import MessageHistoryLoadasoft
+from pydantic import BaseModel
 import os, json, logging, time, dotenv
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
+from openai import OpenAIError, RateLimitError
 from modal import Image, App, Secret, asgi_app, NetworkFileSystem
 
 # Unstructured API imports
@@ -39,9 +40,6 @@ image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
 )
-
-# Initialize the message history
-message_history = MessageHistoryLoadasoft()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -242,6 +240,64 @@ def namespace_exists(namespace_name):
     metadata = index.describe_index_stats().get("namespaces", {})
     return namespace_name in metadata
 
+async def get_gpt_response(message_history, res=None):
+    aclient = Config.aclient
+
+    class Sentiment(BaseModel):
+        response: str
+        is_conversation_over: bool
+
+    try:
+        context_message = message_history if res is None else message_history + f"Use the following context: {res}"
+
+        response = await aclient.beta.chat.completions.parse(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful SMS assistant. Your job is to provide clear and concise responses to customer queries in a professional and conversational tone using the provided context\n\n"
+                                "In addition to responding to the user, determine whether the conversation has reached a conclusion or requires human intervention.\n\n"
+                                "**Guidelines for `is_conversation_over`:**\n"
+                                    "- **Set to `True`** if:\n"
+                                    "  - The user's query has been fully addressed, and no further questions are expected.\n"
+                                    "  - The user requests human support or expresses frustration.\n"
+                                    "  - The issue is too complex for automation.\n\n"
+                                    "- **Set to `False`** if:\n"
+                                    "  - The user is likely to continue the conversation (e.g., asking for more details or clarification).\n"
+                                    "  - There is an open-ended discussion that requires further engagement.\n\n"
+                                    "When in doubt, assume that the user may have further questions and set `is_conversation_over: False`.\n\n"
+                                    "Return your response using the following structured format:\n"
+                                    "`Sentiment(response='<Your response to the user>', is_conversation_over=<True or False>)`"
+                },
+                {"role": "user", "content": context_message}
+            ],
+            response_format=Sentiment,
+            max_tokens=16384
+        )
+
+        # Access the parsed Sentiment object directly
+        parsed_sentiment = response.choices[0].message.parsed
+        token_usage = response.usage.dict()
+
+        # Create a dictionary with the response and token usage
+        res_dict = {
+            "response": parsed_sentiment.response,
+            "is_conversation_over": parsed_sentiment.is_conversation_over,
+            **token_usage
+        }
+
+        logger.info("Response Generated Successfully!")
+
+        return res_dict
+    except RateLimitError as e:
+        logger.info(f"Rate limit exceeded: {e}")
+        return jsonify({"openai error": "Rate limit exceeded: " + str(e)}), 429
+    except OpenAIError as e:
+        logger.info(f"OpenAI API error: {e}")
+        return jsonify({"openai error": "OpenAI API error: " + str(e)}), 500
+    except Exception as e:
+        logger.info(f"Error generating response: {e}")
+        return jsonify({"openai error": str(e)}), 400
+
+
 @quart_app.route('/message-teli-data', methods=['POST'])
 @require_api_key
 async def message_teli_data():
@@ -253,9 +309,12 @@ async def message_teli_data():
         pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
         unique_id = data.get("unique_id")
-        message = data.get("message")
+        message_history = data.get("message_history")
+        stringified_message_history = str(message_history)
 
-        if not all([unique_id, message]):
+        last_message = message_history[-1]["message"]
+
+        if not all([unique_id, message_history]):
             return {"error": "Missing required fields"}, 400
 
         # Check if the namespace exists in the index
@@ -268,7 +327,7 @@ async def message_teli_data():
         # Convert the last_response into a numerical vector that Pinecone can search with
         query_embedding = pc.inference.embed(
             model="multilingual-e5-large",
-            inputs=[message],
+            inputs=[last_message],
             parameters={
                 "input_type": "query"
             }
@@ -288,11 +347,9 @@ async def message_teli_data():
 
         # Establish score threshold for the highest rated response
         threshold = 0.8
-        formatted_message = {"role": "user", "message": message}
         curr_threshold = response.matches[0].score
         if curr_threshold < threshold:
-            gpt_response = await message_history.get_gpt_response(formatted_message, namespace)
-            print(gpt_response)
+            gpt_response = await get_gpt_response(stringified_message_history)
             if gpt_response["is_conversation_over"] == True:
                 logger.info(f"Conversation completed")
                 return jsonify({"response": "Conversation completed"}), 200
@@ -300,8 +357,8 @@ async def message_teli_data():
 
         # Return the most relevant context
         curr_response = response.matches[0].metadata.get('text', '')
-        gpt_response = await message_history.get_gpt_response(formatted_message, namespace, curr_response)
-        print(gpt_response)
+        print(stringified_message_history)
+        gpt_response = await get_gpt_response(stringified_message_history, curr_response)
         if gpt_response["is_conversation_over"] == True:
             logger.info(f"Conversation completed")
             return jsonify({"response": "Conversation completed"}), 200
