@@ -66,12 +66,11 @@ class MessageHistoryLoadasoft:
             raise
 
     async def get_gpt_response(self, message, namespace, res=None):
-        aclient = Config().aclient
+        aclient = Config.aclient
 
         class Sentiment(BaseModel):
             response: str
             is_conversation_over: bool
-            should_human_takeover: bool
 
         try:
             message_history = self.get(namespace)
@@ -79,14 +78,27 @@ class MessageHistoryLoadasoft:
             context_message = str(new_message_history) if res is None else str(new_message_history) + f"Use the following context: {res}"
 
             response = await aclient.beta.chat.completions.parse(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a helpful sms assistant. Provide clear and concise responses to customer queries. Be professional and conversational. Answer questions based on the context provided."},
+                    {"role": "system", "content": "You are a helpful SMS assistant. Your job is to provide clear and concise responses to customer queries in a professional and conversational tone using the provided context\n\n"
+                                    "In addition to responding to the user, determine whether the conversation has reached a conclusion or requires human intervention.\n\n"
+                                    "**Guidelines for `is_conversation_over`:**\n"
+                                      "- **Set to `True`** if:\n"
+                                      "  - The user's query has been fully addressed, and no further questions are expected.\n"
+                                      "  - The user requests human support or expresses frustration.\n"
+                                      "  - The issue is too complex for automation.\n\n"
+                                      "- **Set to `False`** if:\n"
+                                      "  - The user is likely to continue the conversation (e.g., asking for more details or clarification).\n"
+                                      "  - There is an open-ended discussion that requires further engagement.\n\n"
+                                      "Return your response using the following structured format:\n"
+                                      "`Sentiment(response='<Your response to the user>', is_conversation_over=<True or False>)`"
+                    },
                     {"role": "user", "content": context_message}
                 ],
                 response_format=Sentiment,
                 max_tokens=16384
             )
+
             # Access the parsed Sentiment object directly
             parsed_sentiment = response.choices[0].message.parsed
             token_usage = response.usage.dict()
@@ -95,7 +107,6 @@ class MessageHistoryLoadasoft:
             res_dict = {
                 "response": parsed_sentiment.response,
                 "is_conversation_over": parsed_sentiment.is_conversation_over,
-                "should_human_takeover": parsed_sentiment.should_human_takeover,
                 **token_usage
             }
 
