@@ -2,7 +2,7 @@ from config import Config
 from quart_cors import cors
 from functools import wraps
 from pydantic import BaseModel
-import os, json, logging, time, dotenv
+import os, json, logging, time, aiofiles, asyncio, dotenv
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
 from openai import OpenAIError, RateLimitError
@@ -87,7 +87,7 @@ def format_file_for_vectorizing(file, context, endpoint):
     image=image,
     secrets=[Secret.from_name("context-messenger-secrets")]
 )
-def vectorize(unique_id, context_str, file_data):
+async def vectorize(unique_id, context_str, file_data):
     try:
         # Get the Pinecone client and configuration details
         pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
@@ -182,11 +182,11 @@ def vectorize(unique_id, context_str, file_data):
 
         if file_data:
             try:
-                os.remove(input_file_path)
+                await asyncio.to_thread(os.remove, input_file_path)
                 logger.info(f"Input file {input_file_path} deleted successfully.")
 
                 for output_file in os.listdir(OUTPUT_DIR):
-                    os.remove(os.path.join(OUTPUT_DIR, output_file))
+                    await asyncio.to_thread(os.remove, os.path.join(OUTPUT_DIR, output_file))
                     logger.info("Output directory cleaned successfully.")
             except Exception as e:
                 logger.error(f"Error deleting input file: {e}")
@@ -222,7 +222,7 @@ async def ingest_teli_data():
         }
 
         # Call the Modal function
-        result = vectorize.remote(unique_id, context_str, serialized_file)
+        result = vectorize.spawn(unique_id, context_str, serialized_file).get()
 
         if "error" in result:
             logger.info(f"Error in Quart endpoint: {result['error']}")
