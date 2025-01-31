@@ -109,7 +109,6 @@ async def vectorize(unique_id, context_str, file_data):
         if file_data:
             # Save the uploaded file in the input directory
             file_extension = os.path.splitext(filename)[1].lower()
-
             if file_extension != ".pdf":
                 return jsonify({"error": "Unsupported file type"}), 400
 
@@ -117,11 +116,11 @@ async def vectorize(unique_id, context_str, file_data):
             input_endpoint = f"{unique_id}-{filename}"
             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
-            with open(input_file_path, "wb") as f:
-                f.write(file_content)
+            async with aiofiles.open(input_file_path, "wb") as f:
+                await f.write(file_content)
 
-            # Use the Unstructured Pipeline to process the file
-            Pipeline.from_configs(
+            # Process file using Unstructured API
+            await asyncio.to_thread(Pipeline.from_configs(
                 context=ProcessorConfig(),
                 indexer_config=LocalIndexerConfig(input_path=INPUT_DIR),
                 downloader_config=LocalDownloaderConfig(),
@@ -138,7 +137,7 @@ async def vectorize(unique_id, context_str, file_data):
                     }
                 ),
                 uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
-            ).run()
+            ).run)
             logger.info("Pipeline ran successfully!")
 
         # Read processed output files
