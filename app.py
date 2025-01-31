@@ -89,7 +89,6 @@ def format_file_for_vectorizing(file, context, endpoint):
 )
 async def vectorize(unique_id, context_str, file_data):
     try:
-        # Get the Pinecone client and configuration details
         pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
             config_class.pc,
             config_class.INPUT_DIR,
@@ -99,27 +98,28 @@ async def vectorize(unique_id, context_str, file_data):
             config_class.UNSTRUCTURED_API_URL,
         )
 
-        context_arr = json.loads(context_str) if context_str else []
-        filename = file_data['filename']
-        file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
+        # Ensure `context_str` is a list
+        try:
+            context_arr = json.loads(context_str)
+            if not isinstance(context_arr, list):
+                raise ValueError("context_str must be a list")
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON format in context_str"}
+
+        filename = file_data["filename"]
+        file_content = file_data["content"].encode("latin1")
 
         input_endpoint = f"{unique_id}-{filename}"
         input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
         if file_data:
-            # Save the uploaded file in the input directory
             file_extension = os.path.splitext(filename)[1].lower()
             if file_extension != ".pdf":
-                return jsonify({"error": "Unsupported file type"}), 400
-
-            # Save the uploaded file in the input directory in chunks
-            input_endpoint = f"{unique_id}-{filename}"
-            input_file_path = os.path.join(INPUT_DIR, input_endpoint)
+                return {"error": "Unsupported file type"}
 
             async with aiofiles.open(input_file_path, "wb") as f:
                 await f.write(file_content)
 
-            # Process file using Unstructured API
             await asyncio.to_thread(Pipeline.from_configs(
                 context=ProcessorConfig(),
                 indexer_config=LocalIndexerConfig(input_path=INPUT_DIR),
@@ -140,63 +140,63 @@ async def vectorize(unique_id, context_str, file_data):
             ).run)
             logger.info("Pipeline ran successfully!")
 
-        # Read processed output files
         context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
 
-        # Handle embedding batch sizes to avoid memory issues and input size limits
+        # Parallel embedding processing
         batch_size = 100
         text_inputs = [c['text'] for c in context]
-        embeddings = []
-        for i in range(0, len(text_inputs), batch_size):
-            batch = text_inputs[i:i + batch_size]
-            batch_embeddings = pc.inference.embed(
+
+        async def embed_batch(batch):
+            return pc.inference.embed(
                 model="multilingual-e5-large",
                 inputs=batch,
-                parameters={
-                    "input_type": "passage",
-                    "truncate": "END",
-                },
+                parameters={"input_type": "passage", "truncate": "END"}
             )
-            embeddings.extend(batch_embeddings)
 
-        # Prepare the records
-        records = [
-            {"id": c['id'], "values": e['values'], "metadata": {"text": c['text']}}
-            for c, e in zip(context, embeddings)
-        ]
+        embedding_tasks = [embed_batch(text_inputs[i:i+batch_size]) for i in range(0, len(text_inputs), batch_size)]
+        embeddings = await asyncio.gather(*embedding_tasks)
 
-        # Upsert records in batches to avoid memory issues and input size limits
+        # Flatten embeddings
+        embeddings = [e for batch in embeddings for e in batch]
+
+        #  Parallel Upsert to Pinecone
         index = pc.Index(pinecone_index_name)
         namespace = f"{unique_id}-context"
-        for i in range(0, len(records), batch_size):
-            index.upsert(namespace=namespace, vectors=records[i : i + batch_size])
 
-        # Wait for the index to update
-        while True:
-            stats = index.describe_index_stats()
-            current_vector_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
-            if current_vector_count >= len(records):
-                break
-            time.sleep(1)  # Wait and re-check periodically
+        async def upsert_batch(records):
+            if records:
+                index.upsert(namespace=namespace, vectors=records)
 
-        if file_data:
+        upsert_tasks = []
+        for i, e in enumerate(embeddings):
+            if i < len(context) and isinstance(context[i], dict):  # Ensure safe indexing
+                upsert_tasks.append(upsert_batch([{
+                    "id": context[i]["id"],
+                    "values": e["values"],
+                    "metadata": {"text": context[i]["text"]}
+                }]))
+
+        await asyncio.gather(*upsert_tasks)
+
+        # Asynchronous file cleanup
+        async def cleanup_files():
             try:
                 await asyncio.to_thread(os.remove, input_file_path)
-                logger.info(f"Input file {input_file_path} deleted successfully.")
-
                 for output_file in os.listdir(OUTPUT_DIR):
                     await asyncio.to_thread(os.remove, os.path.join(OUTPUT_DIR, output_file))
-                    logger.info("Output directory cleaned successfully.")
+                logger.info("Files cleaned successfully.")
             except Exception as e:
-                logger.error(f"Error deleting input file: {e}")
-                return {"error": "Error deleting input file"}
+                logger.error(f"Error deleting files: {e}")
+
+        await cleanup_files()
 
         logger.info("Pinecone ingestion completed successfully!")
         return {"message": "Pinecone ingested successfully!", "context": context}
 
     except Exception as e:
-        logger.info(f"Error ingesting data: {e}")
+        logger.error(f"Error ingesting data: {e}")
         return {"error": str(e)}
+
 
 @quart_app.route('/ingest-teli-data', methods=['POST'])
 @require_api_key
@@ -224,13 +224,13 @@ async def ingest_teli_data():
         result = vectorize.spawn(unique_id, context_str, serialized_file).get()
 
         if "error" in result:
-            logger.info(f"Error in Quart endpoint: {result['error']}")
-            return jsonify(result), 400
+            logger.error(f"Error in Modal function: {result['error']}")
+            return jsonify(result), 500
 
-        return jsonify(result), 200
+        return jsonify({"message": "Vectorization complete!", "task_id": unique_id}), 202
 
     except Exception as e:
-        logger.error(f"Error in Quart endpoint: {e}")
+        logger.error(f"Error in data ingestion: {e}")
         return jsonify({"error": str(e)}), 500
 
 # Function to check if a namespace exists in a given index
