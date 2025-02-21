@@ -2,11 +2,13 @@ from config import Config
 from quart_cors import cors
 from functools import wraps
 from pydantic import BaseModel
-import os, json, logging, time, aiofiles, asyncio, dotenv
+import os, json, logging, time, dotenv, asyncio
 from quart import Quart, request, jsonify
 from werkzeug.utils import secure_filename
 from openai import OpenAIError, RateLimitError
 from modal import Image, App, Secret, asgi_app, NetworkFileSystem
+import sentencepiece as spm
+from transformers import AutoTokenizer
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -18,6 +20,24 @@ from unstructured_ingest.v2.processes.connectors.local import (
     LocalUploaderConfig
 )
 from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
+
+# Load SentencePiece tokenizer for multilingual-e5-large
+sp = spm.SentencePieceProcessor()
+TOKENIZER_DIR = "./tokenizer_model"
+TOKENIZER_PATH = os.path.join(TOKENIZER_DIR, "sentencepiece.bpe.model")
+
+# Ensure tokenizer is downloaded
+tokenizer = AutoTokenizer.from_pretrained(
+    "intfloat/multilingual-e5-large",
+    cache_dir=TOKENIZER_DIR,
+    use_fast=True  # Ensure fast tokenizer is used
+)
+
+if not os.path.exists(TOKENIZER_PATH):
+    print(f"Tokenizer model not found at {TOKENIZER_PATH}. Downloading...")
+    tokenizer.save_pretrained("./tokenizer_model")
+    TOKENIZER_PATH = "./tokenizer_model/sentencepiece.bpe.model"
+
 
 quart_app = Quart(__name__)
 quart_app = cors(
@@ -38,12 +58,72 @@ network_file_system = NetworkFileSystem.from_name("context-message-generator-nfs
 
 image = (
     Image.debian_slim()
-    .pip_install_from_requirements("requirements.txt")  # Install Python dependencies
+    .pip_install_from_requirements("requirements.txt")
 )
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Tokenization Functions
+def truncate_text(text, max_tokens=96):
+    """Ensure text does not exceed the model's token limit before sending to Pinecone."""
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+    truncated_tokens = tokens[:max_tokens]  # Force truncate to 96 tokens
+    truncated_text = tokenizer.decode(truncated_tokens, skip_special_tokens=True)
+
+    logger.info(f"Truncating: {len(tokens)} tokens -> {len(truncated_tokens)} tokens")
+    assert len(truncated_tokens) <= max_tokens, f"Error: Still too long after truncation ({len(truncated_tokens)} tokens)"
+
+    return truncated_text
+
+def chunk_text(text, max_tokens=96):
+    """Splits long text into chunks of 96 tokens each."""
+    tokens = tokenizer.encode(text)
+    chunks = [tokens[i:i+max_tokens] for i in range(0, len(tokens), max_tokens)]
+    return [tokenizer.decode(chunk, skip_special_tokens=True) for chunk in chunks]
+
+async def shorten_text_with_gpt(text):
+    """
+    Uses GPT to shorten text while maintaining its meaning, ensuring it stays within 96 tokens.
+    """
+    aclient = Config.aclient
+
+    class ShortenedText(BaseModel):
+        shortened: str
+
+    try:
+        prompt = (
+            "Your task is to shorten the following text while keeping its original meaning. "
+            "Ensure the output is 96 tokens or fewer. Do not remove key details. Here is the text:\n\n"
+            f"{text}"
+        )
+
+        response = await aclient.beta.chat.completions.parse(
+            model="gpt-40 mini",
+            messages=[{"role": "system", "content": "You are a text summarization expert. Your job is to shorten long texts while maintaining their full meaning. The shortened text should always be 96 tokens or fewer."},
+                      {"role": "user", "content": prompt}],
+            response_format=ShortenedText,
+            max_tokens=96
+        )
+
+        shortened_text = response.choices[0].message.parsed.shortened
+        token_count = len(tokenizer.encode(shortened_text, add_special_tokens=False))
+
+        if token_count > 96:
+            logger.warning(f"GPT Shortened Text is still too long ({token_count} tokens). Further truncation may be needed.")
+            shortened_text = truncate_text(shortened_text, max_tokens=96)
+
+        logger.info(f"Shortened Text: {shortened_text} ({token_count} tokens)")
+        return shortened_text
+
+    except OpenAIError as e:
+        logger.error(f"OpenAI API error: {e}")
+        return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
+    except Exception as e:
+        logger.error(f"Unexpected error in text shortening: {e}")
+        return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -87,8 +167,9 @@ def format_file_for_vectorizing(file, context, endpoint):
     image=image,
     secrets=[Secret.from_name("context-messenger-secrets")]
 )
-async def vectorize(unique_id, context_str, file_data):
+def vectorize(unique_id, context_str, file_data):
     try:
+        # Get the Pinecone client and configuration details
         pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
             config_class.pc,
             config_class.INPUT_DIR,
@@ -98,29 +179,29 @@ async def vectorize(unique_id, context_str, file_data):
             config_class.UNSTRUCTURED_API_URL,
         )
 
-        # Ensure `context_str` is a list
-        try:
-            context_arr = json.loads(context_str)
-            if not isinstance(context_arr, list):
-                raise ValueError("context_str must be a list")
-        except json.JSONDecodeError:
-            return {"error": "Invalid JSON format in context_str"}
-
-        filename = file_data["filename"]
-        file_content = file_data["content"].encode("latin1")
+        context_arr = json.loads(context_str) if context_str else []
+        filename = file_data['filename']
+        file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
 
         input_endpoint = f"{unique_id}-{filename}"
         input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
         if file_data:
+            # Save the uploaded file in the input directory
             file_extension = os.path.splitext(filename)[1].lower()
+
             if file_extension != ".pdf":
-                return {"error": "Unsupported file type"}
+                return jsonify({"error": "Unsupported file type"}), 400
 
-            async with aiofiles.open(input_file_path, "wb") as f:
-                await f.write(file_content)
+            # Save the uploaded file in the input directory in chunks
+            input_endpoint = f"{unique_id}-{filename}"
+            input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
-            await asyncio.to_thread(Pipeline.from_configs(
+            with open(input_file_path, "wb") as f:
+                f.write(file_content)
+
+            # Use the Unstructured Pipeline to process the file
+            Pipeline.from_configs(
                 context=ProcessorConfig(),
                 indexer_config=LocalIndexerConfig(input_path=INPUT_DIR),
                 downloader_config=LocalDownloaderConfig(),
@@ -137,66 +218,82 @@ async def vectorize(unique_id, context_str, file_data):
                     }
                 ),
                 uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
-            ).run)
+            ).run()
             logger.info("Pipeline ran successfully!")
 
+        # Read processed output files
         context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
 
-        # Parallel embedding processing
-        batch_size = 100
-        text_inputs = [c['text'] for c in context]
+        # Handle embedding batch sizes to avoid memory issues and input size limits
+        batch_size = 96
 
-        async def embed_batch(batch):
-            return pc.inference.embed(
+        # Process text before embedding
+        text_inputs = []
+        for c in context:
+            token_count = len(tokenizer.encode(c['text'], add_special_tokens=False))
+
+            if token_count > 96:
+                shortened_text = asyncio.run(shorten_text_with_gpt(c['text']))
+                text_inputs.extend(chunk_text(shortened_text))
+            else:
+                text_inputs.append(c['text'])
+
+        for i, text in enumerate(text_inputs):
+            length = len(tokenizer.encode(text, add_special_tokens=False))
+            logger.info(f"Text {i}: {length} tokens -> {text}")
+            assert length <= 96, f"Error: Text chunk {i} is still too long ({length} tokens)"
+
+        embeddings = []
+        for i in range(0, len(text_inputs), batch_size):
+            batch = text_inputs[i:i + batch_size]
+            batch_embeddings = pc.inference.embed(
                 model="multilingual-e5-large",
                 inputs=batch,
-                parameters={"input_type": "passage", "truncate": "END"}
+                parameters={
+                    "input_type": "passage",
+                    "truncate": "END",
+                },
             )
+            embeddings.extend(batch_embeddings)
 
-        embedding_tasks = [embed_batch(text_inputs[i:i+batch_size]) for i in range(0, len(text_inputs), batch_size)]
-        embeddings = await asyncio.gather(*embedding_tasks)
+        # Prepare the records
+        records = [
+            {"id": c['id'], "values": e['values'], "metadata": {"text": c['text']}}
+            for c, e in zip(context, embeddings)
+        ]
 
-        # Flatten embeddings
-        embeddings = [e for batch in embeddings for e in batch]
-
-        #  Parallel Upsert to Pinecone
+        # Upsert records in batches to avoid memory issues and input size limits
         index = pc.Index(pinecone_index_name)
         namespace = f"{unique_id}-context"
+        for i in range(0, len(records), batch_size):
+            index.upsert(namespace=namespace, vectors=records[i : i + batch_size])
 
-        async def upsert_batch(records):
-            if records:
-                index.upsert(namespace=namespace, vectors=records)
+        # Wait for the index to update
+        while True:
+            stats = index.describe_index_stats()
+            current_vector_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
+            if current_vector_count >= len(records):
+                break
+            time.sleep(1)  # Wait and re-check periodically
 
-        upsert_tasks = []
-        for i, e in enumerate(embeddings):
-            if i < len(context) and isinstance(context[i], dict):  # Ensure safe indexing
-                upsert_tasks.append(upsert_batch([{
-                    "id": context[i]["id"],
-                    "values": e["values"],
-                    "metadata": {"text": context[i]["text"]}
-                }]))
-
-        await asyncio.gather(*upsert_tasks)
-
-        # Asynchronous file cleanup
-        async def cleanup_files():
+        if file_data:
             try:
-                await asyncio.to_thread(os.remove, input_file_path)
+                os.remove(input_file_path)
+                logger.info(f"Input file {input_file_path} deleted successfully.")
+
                 for output_file in os.listdir(OUTPUT_DIR):
-                    await asyncio.to_thread(os.remove, os.path.join(OUTPUT_DIR, output_file))
-                logger.info("Files cleaned successfully.")
+                    os.remove(os.path.join(OUTPUT_DIR, output_file))
+                    logger.info("Output directory cleaned successfully.")
             except Exception as e:
-                logger.error(f"Error deleting files: {e}")
+                logger.error(f"Error deleting input file: {e}")
+                return {"error": "Error deleting input file"}
 
-        await cleanup_files()
-
-        logger.info("Pinecone ingestion completed successfully!")
-        return {"message": "Pinecone ingested successfully!", "context": context}
+        logger.info("Data ingestion completed successfully!")
+        return {"message": "Data ingested successfully!", "context": context}
 
     except Exception as e:
-        logger.error(f"Error ingesting data: {e}")
+        logger.info(f"Error ingesting data: {e}")
         return {"error": str(e)}
-
 
 @quart_app.route('/ingest-teli-data', methods=['POST'])
 @require_api_key
@@ -221,16 +318,16 @@ async def ingest_teli_data():
         }
 
         # Call the Modal function
-        result = vectorize.spawn(unique_id, context_str, serialized_file).get()
+        result = vectorize.remote(unique_id, context_str, serialized_file)
 
         if "error" in result:
-            logger.error(f"Error in Modal function: {result['error']}")
-            return jsonify(result), 500
+            logger.info(f"Error in Quart endpoint: {result['error']}")
+            return jsonify(result), 400
 
-        return jsonify({"message": "Vectorization complete!", "task_id": unique_id}), 202
+        return jsonify(result), 200
 
     except Exception as e:
-        logger.error(f"Error in data ingestion: {e}")
+        logger.error(f"Error in Quart endpoint: {e}")
         return jsonify({"error": str(e)}), 500
 
 # Function to check if a namespace exists in a given index
