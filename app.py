@@ -180,14 +180,14 @@ def vectorize(unique_id, context_str, file_data):
         )
 
         context_arr = json.loads(context_str) if context_str else []
-        filename = file_data['filename']
-        file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
+        filename = file_data['filename'] if file_data else unique_id
 
         input_endpoint = f"{unique_id}-{filename}"
         input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
         if file_data:
             # Save the uploaded file in the input directory
+            file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
             file_extension = os.path.splitext(filename)[1].lower()
 
             if file_extension != ".pdf":
@@ -225,7 +225,7 @@ def vectorize(unique_id, context_str, file_data):
         context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
 
         # Handle embedding batch sizes to avoid memory issues and input size limits
-        batch_size = 96
+        batch_size = 100
 
         # Process text before embedding
         text_inputs = []
@@ -302,20 +302,24 @@ async def ingest_teli_data():
         # Extract form data and file
         form_data = await request.form
         file_data = await request.files
+        print(form_data)
+        print(file_data)
 
-        if "unique_id" not in form_data or "file" not in file_data:
+        if "unique_id" not in form_data or ("file" not in file_data and "context" not in form_data):
             return jsonify({"error": "Missing required fields"}), 400
 
         unique_id = form_data.get("unique_id")
         context_str = form_data.get("context", "")
         file = file_data.get("file")
+        serialized_file = None
 
         # Serialize file data
-        file_content = file.read()  # Read the file as bytes
-        serialized_file = {
-            "filename": secure_filename(file.filename),
-            "content": file_content.decode("latin1"),  # Encode bytes to string for transmission
-        }
+        if file:
+            file_content = file.read()  # Read the file as bytes
+            serialized_file = {
+                "filename": secure_filename(file.filename),
+                "content": file_content.decode("latin1"),  # Encode bytes to string for transmission
+            }
 
         # Call the Modal function
         result = vectorize.remote(unique_id, context_str, serialized_file)
