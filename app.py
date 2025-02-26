@@ -302,8 +302,6 @@ async def ingest_teli_data():
         # Extract form data and file
         form_data = await request.form
         file_data = await request.files
-        print(form_data)
-        print(file_data)
 
         if "unique_id" not in form_data or ("file" not in file_data and "context" not in form_data):
             return jsonify({"error": "Missing required fields"}), 400
