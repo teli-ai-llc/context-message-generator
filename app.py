@@ -357,8 +357,13 @@ async def gpt_response(message_history, retrieved_contexts=None):
         if ranked_context_str:
             context_message += (
                 f"\n\nNote: The following relevant information has been retrieved. "
-                "Use this as a reference before determining if human intervention is needed.\n"
+                "Use this as a reference before determining if further clarification is needed.\n"
                 f"{ranked_context_str}"
+            )
+        else:
+            context_message += (
+                "\n\nNote: No relevant information was found in prior records. "
+                "If the question is unrelated to the topic, politely guide the conversation back on track."
             )
 
         response = await aclient.beta.chat.completions.parse(
@@ -367,18 +372,21 @@ async def gpt_response(message_history, retrieved_contexts=None):
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional AI assistant, providing clear and informative responses "
-                        "while maintaining an engaging and friendly tone. Your priority is accuracy and helpfulness.\n\n"
+                        "Provide clear, professional, and helpful responses in a conversational tone. "
+                        "Ensure accuracy while keeping interactions natural and engaging.\n\n"
 
-                        "**Guidelines for Response Handling:**\n"
-                        "- **conversation_over** → Only use this if the user explicitly states they have no further questions.\n"
-                        "- **human_intervention** → Only escalate if the user asks about scheduling, availability, or if no clear answer is found in the provided context.\n"
-                        "- **continue_conversation** → If the topic allows for further discussion, provide additional insights or ask if the user would like more details.\n\n"
+                        "**Guidelines for Handling Conversations:**\n"
+                        "- **conversation_over** → Use this only if the user clearly states they have no further questions.\n"
+                        "- **human_intervention** → Escalate only if the user asks about scheduling, availability, or if no clear answer is found in the provided context.\n"
+                        "- **continue_conversation** → If the topic allows for further discussion, offer additional insights or ask if the user would like more details.\n"
+                        "- **out_of_scope** → If the user's question is unrelated, acknowledge it politely and redirect the conversation back to relevant topics.\n\n"
 
-                        "**Important:**\n"
-                        "If the question is broad (e.g., 'Are ocean levels rising?'), assume the user may want more details. "
-                        "Respond with a direct answer, but also offer to expand on related topics (e.g., causes, effects, and solutions). "
-                        "Only mark the conversation as complete if the user explicitly indicates they have no further questions."
+                        "**Handling Out-of-Scope Questions:**\n"
+                        "If a user asks something unrelated, respond in a way that maintains a natural flow:\n"
+                        "👤 User: 'What's the best Italian restaurant nearby?'\n"
+                        "💬 Response: 'That sounds like a great topic! While I don't have restaurant recommendations, I'd be happy to assist with [specific topic]. Let me know how I can help! 😊'\n\n"
+
+                        "If the user continues with off-topic questions, acknowledge their curiosity but steer the conversation back in a professional and engaging manner."
                     )
                 },
                 {"role": "user", "content": context_message}
@@ -390,9 +398,13 @@ async def gpt_response(message_history, retrieved_contexts=None):
         parsed_sentiment = response.choices[0].message.parsed
         token_usage = response.usage.to_dict()
 
+        # If GPT determines the question is off-topic, classify as 'out_of_scope'
+        if "I'm not sure" in parsed_sentiment.response or "I can't help with that" in parsed_sentiment.response:
+            parsed_sentiment.conversation_status = "out_of_scope"
+
         return {
             "response": parsed_sentiment.response,
-            "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation'
+            "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
             **token_usage
         }
 
@@ -480,7 +492,7 @@ async def message_teli_data():
         elif conversation_status == 'conversation_over':
             logger.info("Conversation complete")
             return jsonify({"response": "Conversation complete"}), 200
-        elif conversation_status == 'continue_conversation':
+        elif conversation_status == 'continue_conversation' or conversation_status == 'out_of_scope':
             logger.info("Continue conversation")
             return jsonify({"response": response_text}), 200
 
