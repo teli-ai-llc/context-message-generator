@@ -38,7 +38,6 @@ if not os.path.exists(TOKENIZER_PATH):
     tokenizer.save_pretrained("./tokenizer_model")
     TOKENIZER_PATH = "./tokenizer_model/sentencepiece.bpe.model"
 
-
 quart_app = Quart(__name__)
 quart_app = cors(
     quart_app,
@@ -60,7 +59,6 @@ image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")
 )
-
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -124,6 +122,7 @@ async def shorten_text_with_gpt(text):
     except Exception as e:
         logger.error(f"Unexpected error in text shortening: {e}")
         return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
+
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -225,7 +224,7 @@ def vectorize(unique_id, context_str, file_data):
         context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
 
         # Handle embedding batch sizes to avoid memory issues and input size limits
-        batch_size = 100
+        batch_size = 96
 
         # Process text before embedding
         text_inputs = []
@@ -303,7 +302,7 @@ async def ingest_teli_data():
         form_data = await request.form
         file_data = await request.files
 
-        if "unique_id" not in form_data or ("file" not in file_data and "context" not in form_data):
+        if "unique_id" not in form_data or "file" not in file_data:
             return jsonify({"error": "Missing required fields"}), 400
 
         unique_id = form_data.get("unique_id")
@@ -338,54 +337,65 @@ def namespace_exists(namespace_name):
     metadata = index.describe_index_stats().get("namespaces", {})
     return namespace_name in metadata
 
-async def get_gpt_response(message_history, res=None):
+class Sentiment(BaseModel):
+    response: str
+    conversation_status: str  # Keeps track of 'conversation_over', 'human_intervention', 'continue_conversation'
+
+async def gpt_response(message_history, retrieved_contexts=None):
     aclient = Config.aclient
 
-    class Sentiment(BaseModel):
-        response: str
-        conversation_over_or_human_intervention: str  # New field for unified status
-
     try:
-        context_message = message_history if res is None else message_history + f"\n\nUse the following context: {res}"
+        # Use the top 5 retrieved contexts (already ranked)
+        if retrieved_contexts and isinstance(retrieved_contexts, list):
+            top_contexts = [ctx["text"] for ctx in retrieved_contexts[:5]]
+            ranked_context_str = "\n\n".join(top_contexts) if top_contexts else None
+        else:
+            ranked_context_str = None
+
+        # Construct final context message
+        context_message = message_history
+        if ranked_context_str:
+            context_message += (
+                f"\n\nNote: The following relevant information has been retrieved. "
+                "Use this as a reference before determining if human intervention is needed.\n"
+                f"{ranked_context_str}"
+            )
 
         response = await aclient.beta.chat.completions.parse(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a helpful SMS assistant. Your job is to provide clear and concise responses to customer queries in a professional and conversational tone using the provided context.\n\n"
-                                "In addition to responding to the user, determine whether the conversation has reached a conclusion or requires human intervention.\n\n"
-                                "**Guidelines for `conversation_over_or_human_intervention`:**\n"
-                                    "- **Set to `'conversation_over'`** if:\n"
-                                    "  - The user's query has been fully addressed, and no further questions are expected **AND** they indicate closure (e.g., 'Thanks, that's all!').\n"
-                                    "  - The conversation naturally concludes without requiring further discussion.\n\n"
-                                    "- **Set to `'human_intervention'`** if:\n"
-                                    "  - The user requests to speak with someone (e.g., 'Can I talk to a person?', 'Can I get a call?').\n"
-                                    "  - The issue is too complex for automation.\n"
-                                    "  - The user expresses frustration or dissatisfaction.\n\n"
-                                    "- **Set to `'continue_conversation'`** if:\n"
-                                    "  - The user is likely to ask follow-ups (e.g., 'Are ocean levels rising?' → They may want details on causes, effects, or solutions).\n"
-                                    "  - The response can reasonably prompt further discussion.\n\n"
-                                    "**Response Format:**\n"
-                                    "{ \"response\": \"<Your response to the user>\", \"conversation_over_or_human_intervention\": \"<conversation_over | human_intervention | continue_conversation>\" }"
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional AI assistant, providing clear and informative responses "
+                        "while maintaining an engaging and friendly tone. Your priority is accuracy and helpfulness.\n\n"
+
+                        "**Guidelines for Response Handling:**\n"
+                        "- **conversation_over** → Only use this if the user explicitly states they have no further questions.\n"
+                        "- **human_intervention** → Only escalate if the user asks about scheduling, availability, or if no clear answer is found in the provided context.\n"
+                        "- **continue_conversation** → If the topic allows for further discussion, provide additional insights or ask if the user would like more details.\n\n"
+
+                        "**Important:**\n"
+                        "If the question is broad (e.g., 'Are ocean levels rising?'), assume the user may want more details. "
+                        "Respond with a direct answer, but also offer to expand on related topics (e.g., causes, effects, and solutions). "
+                        "Only mark the conversation as complete if the user explicitly indicates they have no further questions."
+                    )
                 },
                 {"role": "user", "content": context_message}
             ],
             response_format=Sentiment,
-            max_tokens=1024  # Optimized to prevent token overflow
+            max_tokens=1024
         )
 
-        # Extract response text
         parsed_sentiment = response.choices[0].message.parsed
         token_usage = response.usage.to_dict()
 
-        # Create a dictionary with the response and token usage
-        res_dict = {
+        return {
             "response": parsed_sentiment.response,
-            "conversation_over_or_human_intervention": parsed_sentiment.conversation_over_or_human_intervention,
+            "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation'
             **token_usage
         }
 
-        logger.info("Response Generated Successfully!")
-
-        return res_dict
     except RateLimitError as e:
         logger.warning(f"Rate limit exceeded: {e}")
         return {"error": "Rate limit exceeded", "message": str(e)}, 429
@@ -412,72 +422,72 @@ async def message_teli_data():
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
-        stringified_message_history = str(message_history)
-
-        last_message = message_history[-1]["message"]
 
         if not all([unique_id, message_history]):
-            return {"error": "Missing required fields"}, 400
+            return jsonify({"error": "Missing required fields"}), 400
+
+        last_message = message_history[-1]["message"]
+        stringified_message_history = str(message_history)
 
         # Check if the namespace exists in the index
         namespace = f"{unique_id}-context"
         if not namespace_exists(namespace):
             logger.info(f"Namespace {namespace} does not exist")
-            return {"error": "Namespace not found in the index"}, 400
+            return jsonify({"error": "Namespace not found in the index"}), 400
 
-
-        # Convert the last_response into a numerical vector that Pinecone can search with
+        # Convert the last_response into a numerical vector for Pinecone search
         query_embedding = pc.inference.embed(
             model="multilingual-e5-large",
             inputs=[last_message],
-            parameters={
-                "input_type": "query"
-            }
+            parameters={"input_type": "query"}
         )
 
-        # # Retrieve the vector embeddings from the index
+        # Retrieve relevant context from Pinecone
         index = pc.Index(pinecone_index_name)
-
-        # Search for the most relevant context in the index
         response = index.query(
             namespace=namespace,
             vector=query_embedding[0].values,
-            top_k=4,
+            top_k=5,  # Fetch more results to rank them
             include_values=False,
             include_metadata=True
         )
 
-        # Establish score threshold for the highest rated response
-        threshold = 0.8
-        curr_threshold = response.matches[0].score
-        if curr_threshold < threshold:
-            gpt_response = await get_gpt_response(stringified_message_history)
-            if gpt_response["conversation_over_or_human_intervention"] == 'human_intervention':
-                logger.info(f"Human intervention required")
-                return jsonify({"response": "Human intervention required"}), 200
-            elif gpt_response["conversation_over_or_human_intervention"] == 'conversation_over':
-                logger.info(f"Conversation complete")
-                return jsonify({"response": "Conversation complete"}), 200
-            elif gpt_response["conversation_over_or_human_intervention"] == 'continue_conversation':
-                logger.info(f"Continue conversation")
-                return jsonify({"response": gpt_response["response"]}), 200
+        # Rank the retrieved contexts by their score (highest first)
+        if response.matches:
+            ranked_contexts = sorted(
+                response.matches, key=lambda x: x.score, reverse=True
+            )
+            top_contexts = [{"text": match.metadata.get("text", ""), "score": match.score} for match in ranked_contexts]
+        else:
+            top_contexts = []
 
-        # Return the most relevant context
-        curr_response = response.matches[0].metadata.get('text', '')
-        gpt_response = await get_gpt_response(stringified_message_history, curr_response)
-        if gpt_response["conversation_over_or_human_intervention"] == 'human_intervention':
-            logger.info(f"Human intervention required")
+        # Establish score threshold to determine if context is useful
+        threshold = 0.8
+        if not top_contexts or top_contexts[0]["score"] < threshold:
+            logger.info("No highly relevant context found. Using GPT alone.")
+            gpt_response_data = await gpt_response(stringified_message_history)
+        else:
+            logger.info("Using ranked context for GPT response.")
+            gpt_response_data = await gpt_response(stringified_message_history, top_contexts)
+
+        # Handle response based on conversation status
+        conversation_status = gpt_response_data["conversation_status"]
+        response_text = gpt_response_data["response"]
+
+        if conversation_status == 'human_intervention':
+            logger.info("Human intervention required")
             return jsonify({"response": "Human intervention required"}), 200
-        elif gpt_response["conversation_over_or_human_intervention"] == 'conversation_over':
-            logger.info(f"Conversation complete")
+        elif conversation_status == 'conversation_over':
+            logger.info("Conversation complete")
             return jsonify({"response": "Conversation complete"}), 200
-        elif gpt_response["conversation_over_or_human_intervention"] == 'continue_conversation':
-            logger.info(f"Continue conversation")
-            return jsonify({"response": gpt_response["response"]}), 200
+        elif conversation_status == 'continue_conversation':
+            logger.info("Continue conversation")
+            return jsonify({"response": response_text}), 200
 
     except Exception as e:
-        logger.info(f"Error generating response: {e}")
+        logger.error(f"Error generating response: {e}")
         return jsonify({"error": str(e)}), 400
+
 
 @quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])
 @require_api_key
