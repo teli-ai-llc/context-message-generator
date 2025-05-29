@@ -1,14 +1,19 @@
 from config import Config
 from quart_cors import cors
 from functools import wraps
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import os, json, logging, time, dotenv, asyncio
 from quart import Quart, request, jsonify
+from aiohttp import ClientSession
 from werkzeug.utils import secure_filename
 from openai import OpenAIError, RateLimitError
 from modal import Image, App, Secret, asgi_app, NetworkFileSystem
 import sentencepiece as spm
 from transformers import AutoTokenizer
+
+# For testing purposes
+from loan_data import loan_data  # Assuming loan_data is a dictionary with the required structure
+from lead_data import lead_data  # Assuming lead_data is a dictionary with the required structure
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -337,14 +342,96 @@ def namespace_exists(namespace_name):
     metadata = index.describe_index_stats().get("namespaces", {})
     return namespace_name in metadata
 
+class SchemaDiff(BaseModel):
+    updated_schema: dict = Field(..., description="The updated version of the input schema")
+    changes: dict = Field(..., description="The differences found from comparing user input")
+
+    model_config = {
+        "json_schema_extra": {
+            "required": ["updated_schema", "changes"]
+        }
+    }
+
 class Sentiment(BaseModel):
     response: str
-    conversation_status: str  # Keeps track of 'conversation_over', 'human_intervention', 'continue_conversation'
+    conversation_status: str
 
-async def gpt_response(message_history, retrieved_contexts=None):
-    aclient = Config.aclient
+async def get_lead_info(lead_id, loan_id):
+    """
+    Fetches lead and loan information from the Lodasoft API.
+    Returns a tuple of (lead_data, loan_application_model).
+    """
+
+    async with ClientSession() as session:
+        async with session.get(f"https://publicapi.lodasoft.com/api/leads/{lead_id}") as response:
+            response.raise_for_status()
+            lead_data = await response.json()
+            logger.info(f"Fetched lead data for lead_id: {lead_id}")
+
+        async with session.get(f"https://publicapi.lodasoft.com/api/Loan/{loan_id}/get-application-model") as response:
+            response.raise_for_status()
+            loan_application_model = await response.json()
+            logger.info(f"Fetched loan application model for loan_id: {loan_id}")
+
+    return lead_data, loan_application_model
+
+async def gpt_schema_update(aclient, schema_type: str, original: dict, message_history: str) -> tuple[dict, dict]:
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                f"You are a data assistant. The following is the original {schema_type} schema. "
+                "Compare it to the information the user provides in the conversation and return:\n"
+                '{ "updated_schema": {...}, "changes": { "field": { "old": ..., "new": ... } } }'
+                "\nRespond ONLY with a JSON object. Do not include ```json or any explanation."
+            )
+        },
+        {
+            "role": "user",
+            "content": json.dumps({
+                "original_schema": original,
+                "conversation": message_history
+            })
+        }
+    ]
+
+    response = await aclient.chat.completions.create(
+        model="gpt-4o",
+        messages=prompt,
+        max_tokens=16384
+    )
+
+    raw = response.choices[0].message.content.strip()
+
+    # Remove markdown code fences like ```json ... ```
+    if raw.startswith("```json"):
+        raw = raw.removeprefix("```json").strip()
+    if raw.endswith("```"):
+        raw = raw.removesuffix("```").strip()
 
     try:
+        parsed = json.loads(raw)
+        print(parsed)
+        return parsed.get("updated_schema", {}), parsed.get("changes", {})
+    except json.JSONDecodeError:
+        logger.error("GPT response was not valid JSON:\n" + raw)
+        return {}, {}
+
+async def gpt_response(message_history, retrieved_contexts=None, goal=None, lead_id=None, loan_id=None):
+    aclient = Config.aclient
+
+    # lead_data, loan_application_model = await get_lead_info(lead_id, loan_id) if lead_id and loan_id else (None, None)
+
+    try:
+
+        updated_lead_data, lead_changes = await gpt_schema_update(aclient, "lead", lead_data or {}, message_history)
+        updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_data or {}, message_history)
+        # updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_application_model or {}, message_history)
+
+        change_log = ""
+        for field, diff in {**lead_changes, **loan_changes}.items():
+            change_log += f"- `{field}` changed from `{diff['old']}` to `{diff['new']}`\n"
+
         # Use the top 5 retrieved contexts (already ranked)
         if retrieved_contexts and isinstance(retrieved_contexts, list):
             top_contexts = [ctx["text"] for ctx in retrieved_contexts[:5]]
@@ -366,6 +453,9 @@ async def gpt_response(message_history, retrieved_contexts=None):
                 "If the question is unrelated to the topic, politely guide the conversation back on track."
             )
 
+        if change_log:
+            context_message += f"\n\nThe following updates were inferred from the conversation:\n{change_log}"
+
         response = await aclient.beta.chat.completions.parse(
             model="gpt-4o",
             messages=[
@@ -374,6 +464,8 @@ async def gpt_response(message_history, retrieved_contexts=None):
                     "content": (
                         "Provide clear, professional, and helpful responses in a conversational tone. "
                         "Ensure accuracy while keeping interactions natural and engaging.\n\n"
+
+                        f"The goal of this conversation is: {goal}\n\n"
 
                         "**Guidelines for Handling Conversations:**\n"
                         "- **conversation_over** → Use this only if the user clearly states they have no further questions.\n"
@@ -392,7 +484,7 @@ async def gpt_response(message_history, retrieved_contexts=None):
                 {"role": "user", "content": context_message}
             ],
             response_format=Sentiment,
-            max_tokens=1024
+            max_tokens=16384
         )
 
         parsed_sentiment = response.choices[0].message.parsed
@@ -405,6 +497,12 @@ async def gpt_response(message_history, retrieved_contexts=None):
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
+            "updated_lead_data": updated_lead_data,
+            "updated_loan_application_model": updated_loan_data,
+            "changes": {
+                "lead_changes": lead_changes,
+                "loan_changes": loan_changes
+            },
             **token_usage
         }
 
@@ -434,6 +532,9 @@ async def message_teli_data():
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
+        # loan_id = data.get("loan_id", None)
+        # lead_id = data.get("lead_id", None)
+        goal = data.get("goal", None)
 
         if not all([unique_id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
@@ -477,14 +578,15 @@ async def message_teli_data():
         threshold = 0.8
         if not top_contexts or top_contexts[0]["score"] < threshold:
             logger.info("No highly relevant context found. Using GPT alone.")
-            gpt_response_data = await gpt_response(stringified_message_history)
+            gpt_response_data = await gpt_response(stringified_message_history, goal=goal)
         else:
             logger.info("Using ranked context for GPT response.")
-            gpt_response_data = await gpt_response(stringified_message_history, top_contexts)
+            gpt_response_data = await gpt_response(stringified_message_history, top_contexts, goal=goal)
 
         # Handle response based on conversation status
         conversation_status = gpt_response_data["conversation_status"]
-        response_text = gpt_response_data["response"]
+        # response_text = gpt_response_data["response"]
+        response_text = gpt_response_data
 
         if conversation_status == 'human_intervention':
             logger.info("Human intervention required")
