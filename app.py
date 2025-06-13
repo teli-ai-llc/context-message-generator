@@ -12,8 +12,8 @@ import sentencepiece as spm
 from transformers import AutoTokenizer
 
 # For testing purposes
-from loan_data import loan_data  # Assuming loan_data is a dictionary with the required structure
-from lead_data import lead_data  # Assuming lead_data is a dictionary with the required structure
+from loan_data import loan_schema
+from lead_data import lead_schema
 
 # Unstructured API imports
 from unstructured_ingest.v2.pipeline.pipeline import Pipeline
@@ -375,15 +375,19 @@ async def get_lead_info(lead_id, loan_id):
 
     return lead_data, loan_application_model
 
-async def gpt_schema_update(aclient, schema_type: str, original: dict, message_history: str) -> tuple[dict, dict]:
+async def gpt_schema_update(aclient, schema_type: str, original: dict, message_history: str) -> tuple[dict, dict, dict]:
     prompt = [
         {
             "role": "system",
             "content": (
                 f"You are a data assistant. The following is the original {schema_type} schema. "
-                "Compare it to the information the user provides in the conversation and return:\n"
-                '{ "updated_schema": {...}, "changes": { "field": { "old": ..., "new": ... } } }'
-                "\nRespond ONLY with a JSON object. Do not include ```json or any explanation."
+                "The user has provided a conversation that may contain updates to some fields in the schema.\n\n"
+                "Your task is to extract and update ONLY the fields that are clearly mentioned in the conversation.\n"
+                "- If a field is not mentioned, leave its value unchanged.\n"
+                "- If a field is mentioned and its value is different, update it and include the change in the `changes` object.\n\n"
+                "Return the following JSON structure:\n"
+                '{ "updated_schema": { ... }, "changes": { "field_name": { "old": ..., "new": ... } } }\n\n'
+                "Respond ONLY with a JSON object. Do not include ```json or any explanation."
             )
         },
         {
@@ -411,47 +415,62 @@ async def gpt_schema_update(aclient, schema_type: str, original: dict, message_h
 
     try:
         parsed = json.loads(raw)
-        print(parsed)
-        return parsed.get("updated_schema", {}), parsed.get("changes", {})
+        logger.info(f"Parsed schema update: {parsed}")
+
+        # Extract token usage
+        token_usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens
+        }
+
+        # Return updated_schema, changes, token_usage
+        return parsed.get("updated_schema", {}), parsed.get("changes", {}), token_usage
+
     except json.JSONDecodeError:
         logger.error("GPT response was not valid JSON:\n" + raw)
-        return {}, {}
 
-async def gpt_response(message_history, retrieved_contexts=None, goal=None, lead_id=None, loan_id=None):
+        # Return empty dicts with token usage if available
+        token_usage = {
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "total_tokens": response.usage.total_tokens if response.usage else 0
+        }
+
+        return {}, {}, token_usage
+
+
+async def gpt_response(message_history, supplied_contexts=None, goal=None):
     aclient = Config.aclient
 
     # lead_data, loan_application_model = await get_lead_info(lead_id, loan_id) if lead_id and loan_id else (None, None)
 
     try:
 
-        updated_lead_data, lead_changes = await gpt_schema_update(aclient, "lead", lead_data or {}, message_history)
-        updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_data or {}, message_history)
+        updated_lead_data, lead_changes = await gpt_schema_update(aclient, "lead", lead_schema or {}, message_history)
+        updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_schema or {}, message_history)
         # updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_application_model or {}, message_history)
 
         change_log = ""
-        for field, diff in {**lead_changes, **loan_changes}.items():
-            change_log += f"- `{field}` changed from `{diff['old']}` to `{diff['new']}`\n"
+        # for field, diff in {**lead_changes, **loan_changes}.items():
+        #     change_log += f"- `{field}` changed from `{diff['old']}` to `{diff['new']}`\n"
 
-        # Use the top 5 retrieved contexts (already ranked)
-        if retrieved_contexts and isinstance(retrieved_contexts, list):
-            top_contexts = [ctx["text"] for ctx in retrieved_contexts[:5]]
-            ranked_context_str = "\n\n".join(top_contexts) if top_contexts else None
-        else:
-            ranked_context_str = None
-
-        # Construct final context message
-        context_message = message_history
-        if ranked_context_str:
-            context_message += (
-                f"\n\nNote: The following relevant information has been retrieved. "
-                "Use this as a reference before determining if further clarification is needed.\n"
-                f"{ranked_context_str}"
+        if supplied_contexts and isinstance(supplied_contexts, list):
+            context_str = "\n\n".join(supplied_contexts)
+            context_note = (
+                f"\n\nNote: The following relevant information has been supplied as context. "
+                "Use this to better understand the conversation.\n"
+                f"{context_str}"
             )
         else:
-            context_message += (
-                "\n\nNote: No relevant information was found in prior records. "
+            context_note = (
+                "\n\nNote: No additional context was supplied. "
                 "If the question is unrelated to the topic, politely guide the conversation back on track."
             )
+
+        # Construct final context message
+        context_message = "".join([f"{msg['role']}: {msg['message']}\n" for msg in message_history])
+        context_message += context_note
 
         if change_log:
             context_message += f"\n\nThe following updates were inferred from the conversation:\n{change_log}"
@@ -497,11 +516,11 @@ async def gpt_response(message_history, retrieved_contexts=None, goal=None, lead
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
-            "updated_lead_data": updated_lead_data,
-            "updated_loan_application_model": updated_loan_data,
+            # "updated_lead_data": updated_lead_data,
+            # "updated_loan_application_model": updated_loan_data,
             "changes": {
-                "lead_changes": lead_changes,
-                "loan_changes": loan_changes
+                "lead_schema_data": lead_changes,
+                "loan_schema_data": loan_changes
             },
             **token_usage
         }
@@ -519,74 +538,26 @@ async def gpt_response(message_history, retrieved_contexts=None, goal=None, lead
         logger.exception(f"Unexpected error: {e}")
         return {"error": "Unexpected error", "message": str(e)}, 400
 
-
 @quart_app.route('/message-teli-data', methods=['POST'])
 @require_api_key
 async def message_teli_data():
     try:
-        # Grab data from the request body
         data = await request.json
-
-        # Get the Pinecone client
-        pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
-        # loan_id = data.get("loan_id", None)
-        # lead_id = data.get("lead_id", None)
+        supplied_context = data.get("context", [])
         goal = data.get("goal", None)
 
         if not all([unique_id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
 
-        last_message = message_history[-1]["message"]
-        stringified_message_history = str(message_history)
+        logger.info("Using supplied context for GPT response.")
+        gpt_response_data = await gpt_response(message_history, supplied_context, goal=goal)
 
-        # Check if the namespace exists in the index
-        namespace = f"{unique_id}-context"
-        if not namespace_exists(namespace):
-            logger.info(f"Namespace {namespace} does not exist")
-            return jsonify({"error": "Namespace not found in the index"}), 400
-
-        # Convert the last_response into a numerical vector for Pinecone search
-        query_embedding = pc.inference.embed(
-            model="multilingual-e5-large",
-            inputs=[last_message],
-            parameters={"input_type": "query"}
-        )
-
-        # Retrieve relevant context from Pinecone
-        index = pc.Index(pinecone_index_name)
-        response = index.query(
-            namespace=namespace,
-            vector=query_embedding[0].values,
-            top_k=5,  # Fetch more results to rank them
-            include_values=False,
-            include_metadata=True
-        )
-
-        # Rank the retrieved contexts by their score (highest first)
-        if response.matches:
-            ranked_contexts = sorted(
-                response.matches, key=lambda x: x.score, reverse=True
-            )
-            top_contexts = [{"text": match.metadata.get("text", ""), "score": match.score} for match in ranked_contexts]
-        else:
-            top_contexts = []
-
-        # Establish score threshold to determine if context is useful
-        threshold = 0.8
-        if not top_contexts or top_contexts[0]["score"] < threshold:
-            logger.info("No highly relevant context found. Using GPT alone.")
-            gpt_response_data = await gpt_response(stringified_message_history, goal=goal)
-        else:
-            logger.info("Using ranked context for GPT response.")
-            gpt_response_data = await gpt_response(stringified_message_history, top_contexts, goal=goal)
-
-        # Handle response based on conversation status
+        # Handle response
         conversation_status = gpt_response_data["conversation_status"]
-        # response_text = gpt_response_data["response"]
-        response_text = gpt_response_data
+        response = gpt_response_data
 
         if conversation_status == 'human_intervention':
             logger.info("Human intervention required")
@@ -594,13 +565,94 @@ async def message_teli_data():
         elif conversation_status == 'conversation_over':
             logger.info("Conversation complete")
             return jsonify({"response": "Conversation complete"}), 200
-        elif conversation_status == 'continue_conversation' or conversation_status == 'out_of_scope':
+        elif conversation_status in ('continue_conversation', 'out_of_scope'):
             logger.info("Continue conversation")
-            return jsonify({"response": response_text}), 200
+            return jsonify({"response": response['response']}), 200
 
     except Exception as e:
         logger.error(f"Error generating response: {e}")
         return jsonify({"error": str(e)}), 400
+
+# @quart_app.route('/message-teli-data', methods=['POST'])
+# # @require_api_key
+# async def message_teli_data():
+#     try:
+#         # Grab data from the request body
+#         data = await request.json
+
+#         # Get the Pinecone client
+#         pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
+
+#         unique_id = data.get("unique_id")
+#         message_history = data.get("message_history")
+#         supplied_context = data.get("supplied_context")
+#         goal = data.get("goal")
+
+#         if not all([unique_id, message_history, goal, supplied_context]) or not isinstance(message_history, list) or not isinstance(supplied_context, list):
+#             return jsonify({"error": "Missing required fields"}), 400
+
+#         last_message = message_history[-1]["message"]
+#         stringified_message_history = str(message_history)
+
+#         # Check if the namespace exists in the index
+#         namespace = f"{unique_id}-context"
+#         if not namespace_exists(namespace):
+#             logger.info(f"Namespace {namespace} does not exist")
+#             return jsonify({"error": "Namespace not found in the index"}), 400
+
+#         # Convert the last_response into a numerical vector for Pinecone search
+#         query_embedding = pc.inference.embed(
+#             model="multilingual-e5-large",
+#             inputs=[last_message],
+#             parameters={"input_type": "query"}
+#         )
+
+#         # Retrieve relevant context from Pinecone
+#         index = pc.Index(pinecone_index_name)
+#         response = index.query(
+#             namespace=namespace,
+#             vector=query_embedding[0].values,
+#             top_k=5,  # Fetch more results to rank them
+#             include_values=False,
+#             include_metadata=True
+#         )
+
+#         # Rank the retrieved contexts by their score (highest first)
+#         if response.matches:
+#             ranked_contexts = sorted(
+#                 response.matches, key=lambda x: x.score, reverse=True
+#             )
+#             top_contexts = [{"text": match.metadata.get("text", ""), "score": match.score} for match in ranked_contexts]
+#         else:
+#             top_contexts = []
+
+#         # Establish score threshold to determine if context is useful
+#         threshold = 0.8
+#         if not top_contexts or top_contexts[0]["score"] < threshold:
+#             logger.info("No highly relevant context found. Using GPT alone.")
+#             gpt_response_data = await gpt_response(stringified_message_history, goal=goal)
+#         else:
+#             logger.info("Using ranked context for GPT response.")
+#             gpt_response_data = await gpt_response(stringified_message_history, top_contexts, goal=goal)
+
+#         # Handle response based on conversation status
+#         conversation_status = gpt_response_data["conversation_status"]
+#         # response_text = gpt_response_data["response"]
+#         response_text = gpt_response_data
+
+#         if conversation_status == 'human_intervention':
+#             logger.info("Human intervention required")
+#             return jsonify({"response": "Human intervention required"}), 200
+#         elif conversation_status == 'conversation_over':
+#             logger.info("Conversation complete")
+#             return jsonify({"response": "Conversation complete"}), 200
+#         elif conversation_status == 'continue_conversation' or conversation_status == 'out_of_scope':
+#             logger.info("Continue conversation")
+#             return jsonify({"response": response_text}), 200
+
+#     except Exception as e:
+#         logger.error(f"Error generating response: {e}")
+#         return jsonify({"error": str(e)}), 400
 
 
 @quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])
