@@ -487,16 +487,22 @@ async def gpt_schema_update(aclient, schema_type: str, original: dict, user_mess
 
         return {}, token_usage
 
-async def gpt_response(message_history, user_message, contexts=None, goal=None, tone_instructions=None):
+async def gpt_response(message_history, user_message, contexts=None, goal=None, tone_instructions=None, scope="all"):
     # aclient = client
 
     # lead_data, loan_application_model = await get_lead_info(lead_id, loan_id) if lead_id and loan_id else (None, None)
 
     try:
 
-        lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
-        loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
-        # updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_application_model or {}, message_history)
+        if scope == "all":
+            lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
+            loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
+        elif scope == "lead":
+            lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
+            loan_changes, loan_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        elif scope == "loan":
+            lead_changes, lead_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
 
         change_log = ""
 
@@ -600,6 +606,7 @@ async def message_teli_data():
         # context = data.get("context", [])
         tone = data.get("tone", None)
         goal = data.get("goal", None)
+        scope = data.get("scope", "all")
 
         if not all([id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
@@ -612,7 +619,7 @@ async def message_teli_data():
             return jsonify({"error": "No context found for the given id"}), 404
 
         logger.info("Using supplied context for GPT response.")
-        gpt_response_data = await gpt_response(message_history, newest_message, context, goal=goal, tone_instructions=tone)
+        gpt_response_data = await gpt_response(message_history, newest_message, context, goal=goal, tone_instructions=tone, scope=scope)
 
         # Handle response
         conversation_status = gpt_response_data["conversation_status"]
