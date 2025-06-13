@@ -5,43 +5,43 @@ from pydantic import BaseModel, Field
 import os, json, logging, time, dotenv, asyncio
 from quart import Quart, request, jsonify
 from aiohttp import ClientSession
-from werkzeug.utils import secure_filename
-from openai import OpenAIError, RateLimitError
+# from werkzeug.utils import secure_filename
+from openai import OpenAIError, RateLimitError, AsyncOpenAI
 from modal import Image, App, Secret, asgi_app, NetworkFileSystem
-import sentencepiece as spm
-from transformers import AutoTokenizer
+# import sentencepiece as spm
+# from transformers import AutoTokenizer
 
-# For testing purposes
 from loan_data import loan_schema
 from lead_data import lead_schema
+from repository.context import MessageContext
 
 # Unstructured API imports
-from unstructured_ingest.v2.pipeline.pipeline import Pipeline
-from unstructured_ingest.v2.interfaces import ProcessorConfig
-from unstructured_ingest.v2.processes.connectors.local import (
-    LocalIndexerConfig,
-    LocalDownloaderConfig,
-    LocalConnectionConfig,
-    LocalUploaderConfig
-)
-from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
+# from unstructured_ingest.v2.pipeline.pipeline import Pipeline
+# from unstructured_ingest.v2.interfaces import ProcessorConfig
+# from unstructured_ingest.v2.processes.connectors.local import (
+#     LocalIndexerConfig,
+#     LocalDownloaderConfig,
+#     LocalConnectionConfig,
+#     LocalUploaderConfig
+# )
+# from unstructured_ingest.v2.processes.partitioner import PartitionerConfig
 
 # Load SentencePiece tokenizer for multilingual-e5-large
-sp = spm.SentencePieceProcessor()
-TOKENIZER_DIR = "./tokenizer_model"
-TOKENIZER_PATH = os.path.join(TOKENIZER_DIR, "sentencepiece.bpe.model")
+# sp = spm.SentencePieceProcessor()
+# TOKENIZER_DIR = "./tokenizer_model"
+# TOKENIZER_PATH = os.path.join(TOKENIZER_DIR, "sentencepiece.bpe.model")
 
-# Ensure tokenizer is downloaded
-tokenizer = AutoTokenizer.from_pretrained(
-    "intfloat/multilingual-e5-large",
-    cache_dir=TOKENIZER_DIR,
-    use_fast=True  # Ensure fast tokenizer is used
-)
+# # Ensure tokenizer is downloaded
+# tokenizer = AutoTokenizer.from_pretrained(
+#     "intfloat/multilingual-e5-large",
+#     cache_dir=TOKENIZER_DIR,
+#     use_fast=True  # Ensure fast tokenizer is used
+# )
 
-if not os.path.exists(TOKENIZER_PATH):
-    print(f"Tokenizer model not found at {TOKENIZER_PATH}. Downloading...")
-    tokenizer.save_pretrained("./tokenizer_model")
-    TOKENIZER_PATH = "./tokenizer_model/sentencepiece.bpe.model"
+# if not os.path.exists(TOKENIZER_PATH):
+#     print(f"Tokenizer model not found at {TOKENIZER_PATH}. Downloading...")
+#     tokenizer.save_pretrained("./tokenizer_model")
+#     TOKENIZER_PATH = "./tokenizer_model/sentencepiece.bpe.model"
 
 quart_app = Quart(__name__)
 quart_app = cors(
@@ -52,13 +52,14 @@ quart_app = cors(
 )
 
 # Load the configuration and initialize env variables
-quart_app.config["APP_CONFIG"] = Config()
-config_class = quart_app.config["APP_CONFIG"]
-config_class.initialize()
+# quart_app.config["APP_CONFIG"] = Config()
+# config_class = quart_app.config["APP_CONFIG"]
+# config_class.initialize()
 
 # Create a Modal App and Network File System
 modal_app = App("context-message-generator")
 network_file_system = NetworkFileSystem.from_name("context-message-generator-nfs", create_if_missing=True)
+aclient = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 image = (
     Image.debian_slim()
@@ -69,64 +70,66 @@ image = (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+context_store = MessageContext()
+
 # Tokenization Functions
-def truncate_text(text, max_tokens=96):
-    """Ensure text does not exceed the model's token limit before sending to Pinecone."""
-    tokens = tokenizer.encode(text, add_special_tokens=False)
-    truncated_tokens = tokens[:max_tokens]  # Force truncate to 96 tokens
-    truncated_text = tokenizer.decode(truncated_tokens, skip_special_tokens=True)
+# def truncate_text(text, max_tokens=96):
+#     """Ensure text does not exceed the model's token limit before sending to Pinecone."""
+#     tokens = tokenizer.encode(text, add_special_tokens=False)
+#     truncated_tokens = tokens[:max_tokens]  # Force truncate to 96 tokens
+#     truncated_text = tokenizer.decode(truncated_tokens, skip_special_tokens=True)
 
-    logger.info(f"Truncating: {len(tokens)} tokens -> {len(truncated_tokens)} tokens")
-    assert len(truncated_tokens) <= max_tokens, f"Error: Still too long after truncation ({len(truncated_tokens)} tokens)"
+#     logger.info(f"Truncating: {len(tokens)} tokens -> {len(truncated_tokens)} tokens")
+#     assert len(truncated_tokens) <= max_tokens, f"Error: Still too long after truncation ({len(truncated_tokens)} tokens)"
 
-    return truncated_text
+#     return truncated_text
 
-def chunk_text(text, max_tokens=96):
-    """Splits long text into chunks of 96 tokens each."""
-    tokens = tokenizer.encode(text)
-    chunks = [tokens[i:i+max_tokens] for i in range(0, len(tokens), max_tokens)]
-    return [tokenizer.decode(chunk, skip_special_tokens=True) for chunk in chunks]
+# def chunk_text(text, max_tokens=96):
+#     """Splits long text into chunks of 96 tokens each."""
+#     tokens = tokenizer.encode(text)
+#     chunks = [tokens[i:i+max_tokens] for i in range(0, len(tokens), max_tokens)]
+#     return [tokenizer.decode(chunk, skip_special_tokens=True) for chunk in chunks]
 
-async def shorten_text_with_gpt(text):
-    """
-    Uses GPT to shorten text while maintaining its meaning, ensuring it stays within 96 tokens.
-    """
-    aclient = Config.aclient
+# async def shorten_text_with_gpt(text):
+#     """
+#     Uses GPT to shorten text while maintaining its meaning, ensuring it stays within 96 tokens.
+#     """
+#     aclient = client
 
-    class ShortenedText(BaseModel):
-        shortened: str
+#     class ShortenedText(BaseModel):
+#         shortened: str
 
-    try:
-        prompt = (
-            "Your task is to shorten the following text while keeping its original meaning. "
-            "Ensure the output is 96 tokens or fewer. Do not remove key details. Here is the text:\n\n"
-            f"{text}"
-        )
+#     try:
+#         prompt = (
+#             "Your task is to shorten the following text while keeping its original meaning. "
+#             "Ensure the output is 96 tokens or fewer. Do not remove key details. Here is the text:\n\n"
+#             f"{text}"
+#         )
 
-        response = await aclient.beta.chat.completions.parse(
-            model="gpt-40 mini",
-            messages=[{"role": "system", "content": "You are a text summarization expert. Your job is to shorten long texts while maintaining their full meaning. The shortened text should always be 96 tokens or fewer."},
-                      {"role": "user", "content": prompt}],
-            response_format=ShortenedText,
-            max_tokens=96
-        )
+#         response = await aclient.beta.chat.completions.parse(
+#             model="gpt-40 mini",
+#             messages=[{"role": "system", "content": "You are a text summarization expert. Your job is to shorten long texts while maintaining their full meaning. The shortened text should always be 96 tokens or fewer."},
+#                       {"role": "user", "content": prompt}],
+#             response_format=ShortenedText,
+#             max_tokens=96
+#         )
 
-        shortened_text = response.choices[0].message.parsed.shortened
-        token_count = len(tokenizer.encode(shortened_text, add_special_tokens=False))
+#         shortened_text = response.choices[0].message.parsed.shortened
+#         token_count = len(tokenizer.encode(shortened_text, add_special_tokens=False))
 
-        if token_count > 96:
-            logger.warning(f"GPT Shortened Text is still too long ({token_count} tokens). Further truncation may be needed.")
-            shortened_text = truncate_text(shortened_text, max_tokens=96)
+#         if token_count > 96:
+#             logger.warning(f"GPT Shortened Text is still too long ({token_count} tokens). Further truncation may be needed.")
+#             shortened_text = truncate_text(shortened_text, max_tokens=96)
 
-        logger.info(f"Shortened Text: {shortened_text} ({token_count} tokens)")
-        return shortened_text
+#         logger.info(f"Shortened Text: {shortened_text} ({token_count} tokens)")
+#         return shortened_text
 
-    except OpenAIError as e:
-        logger.error(f"OpenAI API error: {e}")
-        return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
-    except Exception as e:
-        logger.error(f"Unexpected error in text shortening: {e}")
-        return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
+#     except OpenAIError as e:
+#         logger.error(f"OpenAI API error: {e}")
+#         return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
+#     except Exception as e:
+#         logger.error(f"Unexpected error in text shortening: {e}")
+#         return truncate_text(text, max_tokens=96)  # Fallback to hard truncation
 
 
 def get_api_key():
@@ -142,205 +145,227 @@ def require_api_key(f):
 
     return decorated_function
 
-def format_file_for_vectorizing(file, context, endpoint):
-    arr = []
-    OUTPUT_DIR = config_class.OUTPUT_DIR
+# def format_file_for_vectorizing(file, context, endpoint):
+#     arr = []
+#     OUTPUT_DIR = config_class.OUTPUT_DIR
 
-    counter = 1
+#     counter = 1
 
-    if file:
-        with open(os.path.join(OUTPUT_DIR, f"{endpoint}.json"), "r") as f:
-            content = json.load(f)
-            arr.extend(
-                {"id": f"vec{counter + i}", "text": obj["text"]}
-                for i, obj in enumerate(content)
-            )
-        counter += len(content)
+#     if file:
+#         with open(os.path.join(OUTPUT_DIR, f"{endpoint}.json"), "r") as f:
+#             content = json.load(f)
+#             arr.extend(
+#                 {"id": f"vec{counter + i}", "text": obj["text"]}
+#                 for i, obj in enumerate(content)
+#             )
+#         counter += len(content)
 
-    if context:
-        arr.extend(
-            {"id": f"vec{counter + i}", "text": text}
-            for i, text in enumerate(context)
-        )
+#     if context:
+#         arr.extend(
+#             {"id": f"vec{counter + i}", "text": text}
+#             for i, text in enumerate(context)
+#         )
 
-    logger.info(f"Formatted context for vectorizing")
-    return arr
+#     logger.info(f"Formatted context for vectorizing")
+#     return arr
 
-@modal_app.function(
-    network_file_systems={"/uploads": network_file_system},
-    image=image,
-    secrets=[Secret.from_name("context-messenger-secrets")]
-)
-def vectorize(unique_id, context_str, file_data):
-    try:
-        # Get the Pinecone client and configuration details
-        pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
-            config_class.pc,
-            config_class.INPUT_DIR,
-            config_class.OUTPUT_DIR,
-            config_class.PINECONE_INDEX_NAME,
-            config_class.UNSTRUCTURED_API_KEY,
-            config_class.UNSTRUCTURED_API_URL,
-        )
+# @modal_app.function(
+#     network_file_systems={"/uploads": network_file_system},
+#     image=image,
+#     secrets=[Secret.from_name("context-messenger-secrets")]
+# )
+# def vectorize(id, context_str, file_data):
+#     try:
+#         # Get the Pinecone client and configuration details
+#         pc, INPUT_DIR, OUTPUT_DIR, pinecone_index_name, unstructured_api_key, unstructured_api_url = (
+#             config_class.pc,
+#             config_class.INPUT_DIR,
+#             config_class.OUTPUT_DIR,
+#             config_class.PINECONE_INDEX_NAME,
+#             config_class.UNSTRUCTURED_API_KEY,
+#             config_class.UNSTRUCTURED_API_URL,
+#         )
 
-        context_arr = json.loads(context_str) if context_str else []
-        filename = file_data['filename'] if file_data else unique_id
+#         context_arr = json.loads(context_str) if context_str else []
+#         filename = file_data['filename'] if file_data else id
 
-        input_endpoint = f"{unique_id}-{filename}"
-        input_file_path = os.path.join(INPUT_DIR, input_endpoint)
+#         input_endpoint = f"{id}-{filename}"
+#         input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
-        if file_data:
-            # Save the uploaded file in the input directory
-            file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
-            file_extension = os.path.splitext(filename)[1].lower()
+#         if file_data:
+#             # Save the uploaded file in the input directory
+#             file_content = file_data['content'].encode("latin1")  # Decode string back to bytes
+#             file_extension = os.path.splitext(filename)[1].lower()
 
-            if file_extension != ".pdf":
-                return jsonify({"error": "Unsupported file type"}), 400
+#             if file_extension != ".pdf":
+#                 return jsonify({"error": "Unsupported file type"}), 400
 
-            # Save the uploaded file in the input directory in chunks
-            input_endpoint = f"{unique_id}-{filename}"
-            input_file_path = os.path.join(INPUT_DIR, input_endpoint)
+#             # Save the uploaded file in the input directory in chunks
+#             input_endpoint = f"{id}-{filename}"
+#             input_file_path = os.path.join(INPUT_DIR, input_endpoint)
 
-            with open(input_file_path, "wb") as f:
-                f.write(file_content)
+#             with open(input_file_path, "wb") as f:
+#                 f.write(file_content)
 
-            # Use the Unstructured Pipeline to process the file
-            Pipeline.from_configs(
-                context=ProcessorConfig(),
-                indexer_config=LocalIndexerConfig(input_path=INPUT_DIR),
-                downloader_config=LocalDownloaderConfig(),
-                source_connection_config=LocalConnectionConfig(),
-                partitioner_config=PartitionerConfig(
-                    partition_by_api=True,
-                    api_key=unstructured_api_key,
-                    partition_endpoint=unstructured_api_url,
-                    strategy="hi_res",
-                    additional_partition_args={
-                        "split_pdf_page": True,
-                        "split_pdf_allow_failed": True,
-                        "split_pdf_concurrency_level": 15
-                    }
-                ),
-                uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
-            ).run()
-            logger.info("Pipeline ran successfully!")
+#             # Use the Unstructured Pipeline to process the file
+#             Pipeline.from_configs(
+#                 context=ProcessorConfig(),
+#                 indexer_config=LocalIndexerConfig(input_path=INPUT_DIR),
+#                 downloader_config=LocalDownloaderConfig(),
+#                 source_connection_config=LocalConnectionConfig(),
+#                 partitioner_config=PartitionerConfig(
+#                     partition_by_api=True,
+#                     api_key=unstructured_api_key,
+#                     partition_endpoint=unstructured_api_url,
+#                     strategy="hi_res",
+#                     additional_partition_args={
+#                         "split_pdf_page": True,
+#                         "split_pdf_allow_failed": True,
+#                         "split_pdf_concurrency_level": 15
+#                     }
+#                 ),
+#                 uploader_config=LocalUploaderConfig(output_dir=OUTPUT_DIR)
+#             ).run()
+#             logger.info("Pipeline ran successfully!")
 
-        # Read processed output files
-        context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
+#         # Read processed output files
+#         context = format_file_for_vectorizing(file_data, context_arr, input_endpoint)
 
-        # Handle embedding batch sizes to avoid memory issues and input size limits
-        batch_size = 96
+#         # Handle embedding batch sizes to avoid memory issues and input size limits
+#         batch_size = 96
 
-        # Process text before embedding
-        text_inputs = []
-        for c in context:
-            token_count = len(tokenizer.encode(c['text'], add_special_tokens=False))
+#         # Process text before embedding
+#         text_inputs = []
+#         for c in context:
+#             token_count = len(tokenizer.encode(c['text'], add_special_tokens=False))
 
-            if token_count > 96:
-                shortened_text = asyncio.run(shorten_text_with_gpt(c['text']))
-                text_inputs.extend(chunk_text(shortened_text))
-            else:
-                text_inputs.append(c['text'])
+#             if token_count > 96:
+#                 shortened_text = asyncio.run(shorten_text_with_gpt(c['text']))
+#                 text_inputs.extend(chunk_text(shortened_text))
+#             else:
+#                 text_inputs.append(c['text'])
 
-        for i, text in enumerate(text_inputs):
-            length = len(tokenizer.encode(text, add_special_tokens=False))
-            logger.info(f"Text {i}: {length} tokens -> {text}")
-            assert length <= 96, f"Error: Text chunk {i} is still too long ({length} tokens)"
+#         for i, text in enumerate(text_inputs):
+#             length = len(tokenizer.encode(text, add_special_tokens=False))
+#             logger.info(f"Text {i}: {length} tokens -> {text}")
+#             assert length <= 96, f"Error: Text chunk {i} is still too long ({length} tokens)"
 
-        embeddings = []
-        for i in range(0, len(text_inputs), batch_size):
-            batch = text_inputs[i:i + batch_size]
-            batch_embeddings = pc.inference.embed(
-                model="multilingual-e5-large",
-                inputs=batch,
-                parameters={
-                    "input_type": "passage",
-                    "truncate": "END",
-                },
-            )
-            embeddings.extend(batch_embeddings)
+#         embeddings = []
+#         for i in range(0, len(text_inputs), batch_size):
+#             batch = text_inputs[i:i + batch_size]
+#             batch_embeddings = pc.inference.embed(
+#                 model="multilingual-e5-large",
+#                 inputs=batch,
+#                 parameters={
+#                     "input_type": "passage",
+#                     "truncate": "END",
+#                 },
+#             )
+#             embeddings.extend(batch_embeddings)
 
-        # Prepare the records
-        records = [
-            {"id": c['id'], "values": e['values'], "metadata": {"text": c['text']}}
-            for c, e in zip(context, embeddings)
-        ]
+#         # Prepare the records
+#         records = [
+#             {"id": c['id'], "values": e['values'], "metadata": {"text": c['text']}}
+#             for c, e in zip(context, embeddings)
+#         ]
 
-        # Upsert records in batches to avoid memory issues and input size limits
-        index = pc.Index(pinecone_index_name)
-        namespace = f"{unique_id}-context"
-        for i in range(0, len(records), batch_size):
-            index.upsert(namespace=namespace, vectors=records[i : i + batch_size])
+#         # Upsert records in batches to avoid memory issues and input size limits
+#         index = pc.Index(pinecone_index_name)
+#         namespace = f"{id}-context"
+#         for i in range(0, len(records), batch_size):
+#             index.upsert(namespace=namespace, vectors=records[i : i + batch_size])
 
-        # Wait for the index to update
-        while True:
-            stats = index.describe_index_stats()
-            current_vector_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
-            if current_vector_count >= len(records):
-                break
-            time.sleep(1)  # Wait and re-check periodically
+#         # Wait for the index to update
+#         while True:
+#             stats = index.describe_index_stats()
+#             current_vector_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
+#             if current_vector_count >= len(records):
+#                 break
+#             time.sleep(1)  # Wait and re-check periodically
 
-        if file_data:
-            try:
-                os.remove(input_file_path)
-                logger.info(f"Input file {input_file_path} deleted successfully.")
+#         if file_data:
+#             try:
+#                 os.remove(input_file_path)
+#                 logger.info(f"Input file {input_file_path} deleted successfully.")
 
-                for output_file in os.listdir(OUTPUT_DIR):
-                    os.remove(os.path.join(OUTPUT_DIR, output_file))
-                    logger.info("Output directory cleaned successfully.")
-            except Exception as e:
-                logger.error(f"Error deleting input file: {e}")
-                return {"error": "Error deleting input file"}
+#                 for output_file in os.listdir(OUTPUT_DIR):
+#                     os.remove(os.path.join(OUTPUT_DIR, output_file))
+#                     logger.info("Output directory cleaned successfully.")
+#             except Exception as e:
+#                 logger.error(f"Error deleting input file: {e}")
+#                 return {"error": "Error deleting input file"}
 
-        logger.info("Data ingestion completed successfully!")
-        return {"message": "Data ingested successfully!", "context": context}
+#         logger.info("Data ingestion completed successfully!")
+#         return {"message": "Data ingested successfully!", "context": context}
 
-    except Exception as e:
-        logger.info(f"Error ingesting data: {e}")
-        return {"error": str(e)}
+#     except Exception as e:
+#         logger.info(f"Error ingesting data: {e}")
+#         return {"error": str(e)}
 
-@quart_app.route('/ingest-teli-data', methods=['POST'])
-@require_api_key
-async def ingest_teli_data():
-    try:
-        # Extract form data and file
-        form_data = await request.form
-        file_data = await request.files
+# @quart_app.route('/ingest-teli-data', methods=['POST'])
+# @require_api_key
+# async def ingest_teli_data():
+#     try:
+#         # Extract form data and file
+#         form_data = await request.form
+#         file_data = await request.files
 
-        if "unique_id" not in form_data or "file" not in file_data:
-            return jsonify({"error": "Missing required fields"}), 400
+#         if "id" not in form_data or "file" not in file_data:
+#             return jsonify({"error": "Missing required fields"}), 400
 
-        unique_id = form_data.get("unique_id")
-        context_str = form_data.get("context", "")
-        file = file_data.get("file")
-        serialized_file = None
+#         id = form_data.get("id")
+#         context_str = form_data.get("context", "")
+#         file = file_data.get("file")
+#         serialized_file = None
 
-        # Serialize file data
-        if file:
-            file_content = file.read()  # Read the file as bytes
-            serialized_file = {
-                "filename": secure_filename(file.filename),
-                "content": file_content.decode("latin1"),  # Encode bytes to string for transmission
-            }
+#         # Serialize file data
+#         if file:
+#             file_content = file.read()  # Read the file as bytes
+#             serialized_file = {
+#                 "filename": secure_filename(file.filename),
+#                 "content": file_content.decode("latin1"),  # Encode bytes to string for transmission
+#             }
 
-        # Call the Modal function
-        result = vectorize.remote(unique_id, context_str, serialized_file)
+#         # Call the Modal function
+#         result = vectorize.remote(id, context_str, serialized_file)
 
-        if "error" in result:
-            logger.info(f"Error in Quart endpoint: {result['error']}")
-            return jsonify(result), 400
+#         if "error" in result:
+#             logger.info(f"Error in Quart endpoint: {result['error']}")
+#             return jsonify(result), 400
 
-        return jsonify(result), 200
+#         return jsonify(result), 200
 
-    except Exception as e:
-        logger.error(f"Error in Quart endpoint: {e}")
-        return jsonify({"error": str(e)}), 500
+#     except Exception as e:
+#         logger.error(f"Error in Quart endpoint: {e}")
+#         return jsonify({"error": str(e)}), 500
 
 # Function to check if a namespace exists in a given index
-def namespace_exists(namespace_name):
-    index = config_class.pc.Index(config_class.PINECONE_INDEX_NAME)
-    metadata = index.describe_index_stats().get("namespaces", {})
-    return namespace_name in metadata
+# def namespace_exists(namespace_name):
+#     index = config_class.pc.Index(config_class.PINECONE_INDEX_NAME)
+#     metadata = index.describe_index_stats().get("namespaces", {})
+#     return namespace_name in metadata
+
+@quart_app.route("/upload_context", methods=["POST"])
+@require_api_key
+async def upload_context():
+    try:
+        data = await request.json
+        id = data.get("id")
+        context = data.get("context")
+
+        if not id or not context or not isinstance(context, list):
+            return jsonify({"error": "Missing required fields: id and context are required."}), 400
+
+        # Save context to DynamoDB
+        await context_store.update_message_context(id, context)
+
+        logging.info(f"Context uploaded successfully for id {id}.")
+        return jsonify({"message": "Context uploaded successfully.", "id": id, "context": context}), 200
+
+    except Exception as e:
+        logging.error(f"Error uploading context: {e}")
+        return jsonify({"error": f"Error uploading context: {str(e)}"}), 500
+
 
 class SchemaDiff(BaseModel):
     updated_schema: dict = Field(..., description="The updated version of the input schema")
@@ -348,7 +373,7 @@ class SchemaDiff(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "required": ["updated_schema", "changes"]
+            "required": ["changes"]
         }
     }
 
@@ -356,24 +381,25 @@ class Sentiment(BaseModel):
     response: str
     conversation_status: str
 
-async def get_lead_info(lead_id, loan_id):
-    """
-    Fetches lead and loan information from the Lodasoft API.
-    Returns a tuple of (lead_data, loan_application_model).
-    """
+@quart_app.route("/get_context/<id>", methods=["GET"])
+@require_api_key
+async def get_context(id):
+    try:
+        if not id:
+            return jsonify({"error": "Missing required field: id"}), 400
 
-    async with ClientSession() as session:
-        async with session.get(f"https://publicapi.lodasoft.com/api/leads/{lead_id}") as response:
-            response.raise_for_status()
-            lead_data = await response.json()
-            logger.info(f"Fetched lead data for lead_id: {lead_id}")
+        # Retrieve context from DynamoDB
+        context = context_store.get(id)
 
-        async with session.get(f"https://publicapi.lodasoft.com/api/Loan/{loan_id}/get-application-model") as response:
-            response.raise_for_status()
-            loan_application_model = await response.json()
-            logger.info(f"Fetched loan application model for loan_id: {loan_id}")
+        if not context:
+            return jsonify({"error": "No context found for the given id"}), 404
 
-    return lead_data, loan_application_model
+        logging.info(f"Context retrieved successfully for id {id}.")
+        return jsonify({"id": id, "context": context}), 200
+
+    except Exception as e:
+        logging.error(f"Error retrieving context: {e}")
+        return jsonify({"error": f"Error retrieving context: {str(e)}"}), 500
 
 async def gpt_schema_update(aclient, schema_type: str, original: dict, user_message: str) -> tuple[dict, dict]:
     prompt = [
@@ -444,8 +470,8 @@ async def gpt_schema_update(aclient, schema_type: str, original: dict, user_mess
 
         return {}, token_usage
 
-async def gpt_response(message_history, user_message, supplied_contexts=None, goal=None, tone_instructions=None):
-    aclient = Config.aclient
+async def gpt_response(message_history, user_message, contexts=None, goal=None, tone_instructions=None):
+    # aclient = client
 
     # lead_data, loan_application_model = await get_lead_info(lead_id, loan_id) if lead_id and loan_id else (None, None)
 
@@ -457,8 +483,8 @@ async def gpt_response(message_history, user_message, supplied_contexts=None, go
 
         change_log = ""
 
-        if supplied_contexts and isinstance(supplied_contexts, list):
-            context_str = "\n\n".join(supplied_contexts)
+        if contexts and isinstance(contexts, list):
+            context_str = "\n\n".join(contexts)
             context_note = (
                 f"\n\nNote: The following relevant information has been supplied as context. "
                 "Use this to better understand the conversation.\n"
@@ -552,19 +578,24 @@ async def message_teli_data():
     try:
         data = await request.json
 
-        unique_id = data.get("unique_id")
+        id = data.get("id")
         message_history = data.get("message_history")
-        supplied_context = data.get("context", [])
+        # context = data.get("context", [])
         tone = data.get("tone", None)
         goal = data.get("goal", None)
 
-        if not all([unique_id, message_history]):
+        if not all([id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
 
         newest_message = message_history[-1]["message"]
+        context = context_store.get(id)
+
+        if not context:
+            logger.info(f"No context found for id {id}. Using GPT alone.")
+            return jsonify({"error": "No context found for the given id"}), 404
 
         logger.info("Using supplied context for GPT response.")
-        gpt_response_data = await gpt_response(message_history, newest_message, supplied_context, goal=goal, tone_instructions=tone)
+        gpt_response_data = await gpt_response(message_history, newest_message, context, goal=goal, tone_instructions=tone)
 
         # Handle response
         conversation_status = gpt_response_data["conversation_status"]
@@ -594,19 +625,19 @@ async def message_teli_data():
 #         # Get the Pinecone client
 #         pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
-#         unique_id = data.get("unique_id")
+#         id = data.get("id")
 #         message_history = data.get("message_history")
-#         supplied_context = data.get("supplied_context")
+#         context = data.get("context")
 #         goal = data.get("goal")
 
-#         if not all([unique_id, message_history, goal, supplied_context]) or not isinstance(message_history, list) or not isinstance(supplied_context, list):
+#         if not all([id, message_history, goal, context]) or not isinstance(message_history, list) or not isinstance(context, list):
 #             return jsonify({"error": "Missing required fields"}), 400
 
 #         last_message = message_history[-1]["message"]
 #         stringified_message_history = str(message_history)
 
 #         # Check if the namespace exists in the index
-#         namespace = f"{unique_id}-context"
+#         namespace = f"{id}-context"
 #         if not namespace_exists(namespace):
 #             logger.info(f"Namespace {namespace} does not exist")
 #             return jsonify({"error": "Namespace not found in the index"}), 400
@@ -666,30 +697,30 @@ async def message_teli_data():
 #         return jsonify({"error": str(e)}), 400
 
 
-@quart_app.route('/delete-namespace/<unique_id>', methods=['DELETE'])
-@require_api_key
-async def delete_namespace(unique_id):
-    try:
-        # Get the Pinecone client
-        pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
+# @quart_app.route('/delete-namespace/<id>', methods=['DELETE'])
+# @require_api_key
+# async def delete_namespace(id):
+#     try:
+#         # Get the Pinecone client
+#         pc, pinecone_index_name = config_class.pc, config_class.PINECONE_INDEX_NAME
 
-        if not unique_id:
-            return {"error": "Missing required fields"}, 400
+#         if not id:
+#             return {"error": "Missing required fields"}, 400
 
-        # Check if the namespace exists in the index
-        namespace = f"{unique_id}-context"
-        if not namespace_exists(namespace):
-            return {"error": "Namespace not found in the index"}, 400
+#         # Check if the namespace exists in the index
+#         namespace = f"{id}-context"
+#         if not namespace_exists(namespace):
+#             return {"error": "Namespace not found in the index"}, 400
 
-        # Delete the namespace from the index
-        index = pc.Index(pinecone_index_name)
-        index.delete(delete_all=True, namespace=namespace)
+#         # Delete the namespace from the index
+#         index = pc.Index(pinecone_index_name)
+#         index.delete(delete_all=True, namespace=namespace)
 
-        return jsonify({"message": "Namespace deleted successfully"}), 200
+#         return jsonify({"message": "Namespace deleted successfully"}), 200
 
-    except Exception as e:
-        logger.info(f"Error deleting namespace: {e}")
-        return jsonify({"error": str(e)}), 400
+#     except Exception as e:
+#         logger.info(f"Error deleting namespace: {e}")
+#         return jsonify({"error": str(e)}), 400
 
 # For deployment with Modal
 @modal_app.function(

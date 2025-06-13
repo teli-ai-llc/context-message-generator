@@ -19,10 +19,10 @@ def create_dynamo_table(table_name):
         table = boto_client.create_table(
             TableName=table_name,
             KeySchema=[
-                {'AttributeName': 'namespace', 'KeyType': 'HASH'},  # Partition key
+                {'AttributeName': 'id', 'KeyType': 'HASH'},  # Partition key
             ],
             AttributeDefinitions=[
-                {'AttributeName': 'namespace', 'AttributeType': 'S'},
+                {'AttributeName': 'id', 'AttributeType': 'S'},
             ],
             BillingMode='PAY_PER_REQUEST'  # No need to specify RCU/WCU
         )
@@ -47,3 +47,17 @@ def get_dynamo_table(table_name):
         else:
             logging.error(f"Failed to connect to table {table_name}: {e}")
             raise
+
+def delete_dynamo_table(table_name):
+    try:
+        table = boto_client.Table(table_name)
+        table.delete()
+        logging.info(f"Table {table_name} deleted successfully.")
+    except ClientError as e:
+        logging.error(f"Failed to delete table {table_name}: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while deleting table {table_name}: {e}")
+        raise
+
+# delete_dynamo_table("message_context")
