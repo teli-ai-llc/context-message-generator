@@ -375,18 +375,23 @@ async def get_lead_info(lead_id, loan_id):
 
     return lead_data, loan_application_model
 
-async def gpt_schema_update(aclient, schema_type: str, original: dict, message_history: str) -> tuple[dict, dict, dict]:
+async def gpt_schema_update(aclient, schema_type: str, original: dict, user_message: str) -> tuple[dict, dict]:
     prompt = [
         {
             "role": "system",
             "content": (
                 f"You are a data assistant. The following is the original {schema_type} schema. "
-                "The user has provided a conversation that may contain updates to some fields in the schema.\n\n"
-                "Your task is to extract and update ONLY the fields that are clearly mentioned in the conversation.\n"
-                "- If a field is not mentioned, leave its value unchanged.\n"
-                "- If a field is mentioned and its value is different, update it and include the change in the `changes` object.\n\n"
-                "Return the following JSON structure:\n"
-                '{ "updated_schema": { ... }, "changes": { "field_name": { "old": ..., "new": ... } } }\n\n'
+                "The user has provided a message that may contain updates to some fields in the schema.\n\n"
+                "Your task is to extract ONLY the fields clearly mentioned in the message and return them as a nested object.\n"
+                "- If a field is mentioned, include it in the result with its new value.\n"
+                "- If a field is not mentioned, do not include it.\n"
+                "- If a field is nested (inside another object), return it as a nested object (e.g. { \"solar\": { \"firstName\": \"John\" } }).\n"
+                "- If the same field name appears in multiple places in the schema, nest it correctly inside its parent object. Do not use dot notation. For example: { \"solar\": { \"firstName\": \"John\" } }.\n"
+                "- If the user message provides general personal information (e.g. name, phone, email) without specifying context, map it to the most general applicant-level fields first (e.g. \"loanApplicant.firstName\" if applicable).\n"
+                "- Do not make assumptions. If the user message is ambiguous, only extract fields when there is a clear match. Otherwise leave them out.\n\n"
+                "Return ONLY the following JSON structure:\n"
+                '{ \"extracted_fields\": { \"field_name\": value, ... } }\n\n'
+                "Do not include the entire updated schema. Only include the fields mentioned in the user message.\n"
                 "Respond ONLY with a JSON object. Do not include ```json or any explanation."
             )
         },
@@ -394,7 +399,7 @@ async def gpt_schema_update(aclient, schema_type: str, original: dict, message_h
             "role": "user",
             "content": json.dumps({
                 "original_schema": original,
-                "conversation": message_history
+                "user_message": user_message
             })
         }
     ]
@@ -424,36 +429,33 @@ async def gpt_schema_update(aclient, schema_type: str, original: dict, message_h
             "total_tokens": response.usage.total_tokens
         }
 
-        # Return updated_schema, changes, token_usage
-        return parsed.get("updated_schema", {}), parsed.get("changes", {}), token_usage
+        # Return extracted_fields only, token_usage
+        return parsed.get("extracted_fields", {}), token_usage
 
     except json.JSONDecodeError:
         logger.error("GPT response was not valid JSON:\n" + raw)
 
-        # Return empty dicts with token usage if available
+        # Return empty dict with token usage if available
         token_usage = {
             "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if response.usage else 0,
             "total_tokens": response.usage.total_tokens if response.usage else 0
         }
 
-        return {}, {}, token_usage
+        return {}, token_usage
 
-
-async def gpt_response(message_history, supplied_contexts=None, goal=None):
+async def gpt_response(message_history, user_message, supplied_contexts=None, goal=None, tone_instructions=None):
     aclient = Config.aclient
 
     # lead_data, loan_application_model = await get_lead_info(lead_id, loan_id) if lead_id and loan_id else (None, None)
 
     try:
 
-        updated_lead_data, lead_changes = await gpt_schema_update(aclient, "lead", lead_schema or {}, message_history)
-        updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_schema or {}, message_history)
+        lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
+        loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
         # updated_loan_data, loan_changes = await gpt_schema_update(aclient, "loan", loan_application_model or {}, message_history)
 
         change_log = ""
-        # for field, diff in {**lead_changes, **loan_changes}.items():
-        #     change_log += f"- `{field}` changed from `{diff['old']}` to `{diff['new']}`\n"
 
         if supplied_contexts and isinstance(supplied_contexts, list):
             context_str = "\n\n".join(supplied_contexts)
@@ -481,8 +483,7 @@ async def gpt_response(message_history, supplied_contexts=None, goal=None):
                 {
                     "role": "system",
                     "content": (
-                        "Provide clear, professional, and helpful responses in a conversational tone. "
-                        "Ensure accuracy while keeping interactions natural and engaging.\n\n"
+                        f"{tone_instructions or 'Provide clear, professional, and helpful responses in a conversational tone. Ensure accuracy while keeping interactions natural and engaging.'}\n\n"
 
                         f"The goal of this conversation is: {goal}\n\n"
 
@@ -495,9 +496,10 @@ async def gpt_response(message_history, supplied_contexts=None, goal=None):
                         "**Handling Out-of-Scope Questions:**\n"
                         "If a user asks something unrelated, respond in a way that maintains a natural flow:\n"
                         "👤 User: 'What's the best Italian restaurant nearby?'\n"
-                        "💬 Response: 'That sounds like a great topic! While I don't have restaurant recommendations, I'd be happy to assist with [specific topic]. Let me know how I can help! 😊'\n\n"
+                        "💬 Response: 'That sounds like a great topic! While I don't have restaurant recommendations, I'd be happy to assist with [specific topic]. Let me know how I can help!'\n\n"
 
                         "If the user continues with off-topic questions, acknowledge their curiosity but steer the conversation back in a professional and engaging manner."
+                        "DO NOT USE EMOTICONS OR EMOJIS IN YOUR RESPONSES EVER.\n\n"
                     )
                 },
                 {"role": "user", "content": context_message}
@@ -513,16 +515,22 @@ async def gpt_response(message_history, supplied_contexts=None, goal=None):
         if "I'm not sure" in parsed_sentiment.response or "I can't help with that" in parsed_sentiment.response:
             parsed_sentiment.conversation_status = "out_of_scope"
 
+        total_response_tokens = token_usage.get("total_tokens", 0)
+        total_lead_tokens = lead_token_usage.get("total_tokens", 0)
+        total_loan_tokens = loan_token_usage.get("total_tokens", 0)
+
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
-            # "updated_lead_data": updated_lead_data,
-            # "updated_loan_application_model": updated_loan_data,
             "changes": {
                 "lead_schema_data": lead_changes,
                 "loan_schema_data": loan_changes
             },
-            **token_usage
+            "token_usage": {
+                "response_tokens": total_response_tokens,
+                "lead_schema_tokens": total_lead_tokens,
+                "loan_schema_tokens": total_loan_tokens
+            }
         }
 
     except RateLimitError as e:
@@ -547,13 +555,16 @@ async def message_teli_data():
         unique_id = data.get("unique_id")
         message_history = data.get("message_history")
         supplied_context = data.get("context", [])
+        tone = data.get("tone", None)
         goal = data.get("goal", None)
 
         if not all([unique_id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
 
+        newest_message = message_history[-1]["message"]
+
         logger.info("Using supplied context for GPT response.")
-        gpt_response_data = await gpt_response(message_history, supplied_context, goal=goal)
+        gpt_response_data = await gpt_response(message_history, newest_message, supplied_context, goal=goal, tone_instructions=tone)
 
         # Handle response
         conversation_status = gpt_response_data["conversation_status"]
@@ -567,7 +578,7 @@ async def message_teli_data():
             return jsonify({"response": "Conversation complete"}), 200
         elif conversation_status in ('continue_conversation', 'out_of_scope'):
             logger.info("Continue conversation")
-            return jsonify({"response": response['response']}), 200
+            return jsonify({"response": response}), 200
 
     except Exception as e:
         logger.error(f"Error generating response: {e}")
