@@ -401,6 +401,23 @@ async def get_context(id):
         logging.error(f"Error retrieving context: {e}")
         return jsonify({"error": f"Error retrieving context: {str(e)}"}), 500
 
+@quart_app.route("/delete_context/<id>", methods=["DELETE"])
+@require_api_key
+async def delete_context(id):
+    try:
+        if not id:
+            return jsonify({"error": "Missing required field: id"}), 400
+
+        # Delete context from DynamoDB
+        context_store.delete(id)
+
+        logging.info(f"Context deleted successfully for id {id}.")
+        return jsonify({"message": "Context deleted successfully.", "id": id}), 200
+
+    except Exception as e:
+        logging.error(f"Error deleting context: {e}")
+        return jsonify({"error": f"Error deleting context: {str(e)}"}), 500
+
 async def gpt_schema_update(aclient, schema_type: str, original: dict, user_message: str) -> tuple[dict, dict]:
     prompt = [
         {
