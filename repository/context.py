@@ -1,10 +1,7 @@
 import logging
 from quart import jsonify
-from config import Config
-from pydantic import BaseModel
 from repository import get_dynamo_table
 from botocore.exceptions import ClientError
-from openai import OpenAIError, RateLimitError
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
