@@ -264,16 +264,16 @@ async def gpt_response(message_history, user_message, contexts=None, goal=None, 
         if "I'm not sure" in parsed_sentiment.response or "I can't help with that" in parsed_sentiment.response:
             parsed_sentiment.conversation_status = "out_of_scope"
 
-        total_response_tokens = token_usage.get("total_tokens", 0)
-        total_lead_tokens = lead_token_usage.get("total_tokens", 0)
-        total_loan_tokens = loan_token_usage.get("total_tokens", 0)
+        # total_response_tokens = token_usage.get("total_tokens", 0)
+        # total_lead_tokens = lead_token_usage.get("total_tokens", 0)
+        # total_loan_tokens = loan_token_usage.get("total_tokens", 0)
 
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
             "changes": {
-                "lead_schema_data": lead_changes,
-                "loan_schema_data": loan_changes
+                # "lead_schema_data": lead_changes,
+                # "loan_schema_data": loan_changes
             },
             # "token_usage": {
             #     "response_tokens": total_response_tokens,
