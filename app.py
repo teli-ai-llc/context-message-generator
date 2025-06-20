@@ -7,6 +7,9 @@ from aiohttp import ClientSession
 from openai import OpenAIError, RateLimitError, AsyncOpenAI
 from modal import Image, App, Secret, asgi_app
 
+from lead_schema import lead_schema
+from loan_schema import loan_schema
+
 from repository.context import MessageContext
 
 quart_app = Quart(__name__)
@@ -195,15 +198,15 @@ async def gpt_response(message_history, user_message, contexts=None, goal=None, 
 
     try:
 
-        # if scope == "all":
-        #     lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
-        #     loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
-        # elif scope == "lead_info":
-        #     lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
-        #     loan_changes, loan_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
-        # elif scope == "loan_info":
-        #     lead_changes, lead_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
-        #     loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
+        if scope == "all":
+            lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
+            loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
+        elif scope == "lead_info":
+            lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
+            loan_changes, loan_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        elif scope == "loan_info":
+            lead_changes, lead_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
 
         change_log = ""
 
@@ -265,16 +268,16 @@ async def gpt_response(message_history, user_message, contexts=None, goal=None, 
         if "I'm not sure" in parsed_sentiment.response or "I can't help with that" in parsed_sentiment.response:
             parsed_sentiment.conversation_status = "out_of_scope"
 
-        # total_response_tokens = token_usage.get("total_tokens", 0)
-        # total_lead_tokens = lead_token_usage.get("total_tokens", 0)
-        # total_loan_tokens = loan_token_usage.get("total_tokens", 0)
+        total_response_tokens = token_usage.get("total_tokens", 0)
+        total_lead_tokens = lead_token_usage.get("total_tokens", 0)
+        total_loan_tokens = loan_token_usage.get("total_tokens", 0)
 
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
             "changes": {
-                # "lead_schema_data": lead_changes,
-                # "loan_schema_data": loan_changes
+                "lead_schema_data": lead_changes,
+                "loan_schema_data": loan_changes
             },
             # "token_usage": {
             #     "response_tokens": total_response_tokens,
