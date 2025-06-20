@@ -17,6 +17,7 @@ quart_app = cors(
     allow_methods=["POST", "DELETE"]
 )
 
+
 # Create a Modal App and Network File System
 modal_app = App("bonzo-app")
 aclient = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
