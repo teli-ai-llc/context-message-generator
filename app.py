@@ -217,7 +217,7 @@ async def gpt_schema_update(schema_name, original_schema, user_message, message_
         return {}, {}
 
 
-async def gpt_response(message_history, user_message, context=None, goal=None, tone_instructions=None, schema_list=None, scope=[]):
+async def gpt_response(message_history, user_message, context=None, goal=None, tone_instructions=None, schema_list=None, scope=None):
     try:
         # Initialize dictionaries to store schema changes and token usage
         schema_changes = {}
@@ -225,7 +225,7 @@ async def gpt_response(message_history, user_message, context=None, goal=None, t
 
         # If a schema_list is provided, process each schema in the list
         if schema_list and isinstance(schema_list, list):
-            if "all" in scope:
+            if "all" in scope or len(scope) == 0:
                 for schema in schema_list:
                     schema_name = schema.get("name")  # Assuming each schema has a 'name' field
                     schema_data = schema.get("data", {})  # Assuming schema data is inside 'data'
@@ -327,7 +327,8 @@ async def message_teli_data():
         message_history = data.get("message_history")
         tone = data.get("tone", None)
         goal = data.get("goal", None)
-        scope = data.get("schema_scope", "all")
+        scope = data.get("schema_scope", [])
+        print(f"Received scope: {scope}")
 
         if not all([id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
