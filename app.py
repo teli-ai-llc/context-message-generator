@@ -1,14 +1,12 @@
 from quart_cors import cors
 from functools import wraps
+from decimal import Decimal
 from pydantic import BaseModel, Field
 import os, json, logging, time, dotenv, asyncio
 from quart import Quart, request, jsonify
 from aiohttp import ClientSession
 from openai import OpenAIError, RateLimitError, AsyncOpenAI
 from modal import Image, App, Secret, asgi_app
-
-from lead_schema import lead_schema
-from loan_schema import loan_schema
 
 from repository.context import MessageContext
 
@@ -56,15 +54,20 @@ async def upload_context():
         data = await request.json
         id = data.get("id")
         context = data.get("context")
+        schema_context = data.get("schema_context", [])
 
+        # Validation for the required fields
         if not id or not context or not isinstance(context, list):
             return jsonify({"error": "Missing required fields: id and context are required."}), 400
 
-        # Save context to DynamoDB
-        await context_store.update_message_context(id, context)
+        if schema_context and not isinstance(schema_context, list):
+            return jsonify({"error": "Invalid schema_context format. It must be a list of schemas."}), 400
+
+        # Save context and schema_context to the database
+        await context_store.update_message_context(id, context, schema_context)
 
         logging.info(f"Context uploaded successfully for id {id}.")
-        return jsonify({"message": "Context uploaded successfully.", "id": id, "context": context}), 200
+        return jsonify({"message": "Context uploaded successfully.", "id": id, "context": context, "schema_context": schema_context}), 200
 
     except Exception as e:
         logging.error(f"Error uploading context: {e}")
@@ -122,99 +125,143 @@ async def delete_context(id):
         logging.error(f"Error deleting context: {e}")
         return jsonify({"error": f"Error deleting context: {str(e)}"}), 500
 
-async def gpt_schema_update(aclient, schema_type: str, original: dict, user_message: str) -> tuple[dict, dict]:
-    prompt = [
-        {
-            "role": "system",
-            "content": (
-                f"You are a data assistant. The following is the original {schema_type} schema. "
-                "The user has provided a message that may contain updates to some fields in the schema.\n\n"
-                "Your task is to extract ONLY the fields clearly mentioned in the message and return them as a nested object.\n"
-                "- If a field is mentioned, include it in the result with its new value.\n"
-                "- If a field is not mentioned, do not include it.\n"
-                "- If a field is nested (inside another object), return it as a nested object (e.g. { \"solar\": { \"firstName\": \"John\" } }).\n"
-                "- If the same field name appears in multiple places in the schema, nest it correctly inside its parent object. Do not use dot notation. For example: { \"solar\": { \"firstName\": \"John\" } }.\n"
-                "- If the user message provides general personal information (e.g. name, phone, email) without specifying context, map it to the most general applicant-level fields first (e.g. \"loanApplicant.firstName\" if applicable).\n"
-                "- Do not make assumptions. If the user message is ambiguous, only extract fields when there is a clear match. Otherwise leave them out.\n\n"
-                "Return ONLY the following JSON structure:\n"
-                '{ \"extracted_fields\": { \"field_name\": value, ... } }\n\n'
-                "Do not include the entire updated schema. Only include the fields mentioned in the user message.\n"
-                "Respond ONLY with a JSON object. Do not include ```json or any explanation."
-            )
-        },
-        {
-            "role": "user",
-            "content": json.dumps({
-                "original_schema": original,
-                "user_message": user_message
-            })
-        }
-    ]
+def decimal_default(obj):
+    if isinstance(obj, Decimal):
+        return float(obj)  # Convert Decimal to float for JSON serialization
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
-    response = await aclient.chat.completions.create(
-        model="gpt-4o",
-        messages=prompt,
-        max_tokens=16384
-    )
-
-    raw = response.choices[0].message.content.strip()
-
-    # Remove markdown code fences like ```json ... ```
-    if raw.startswith("```json"):
-        raw = raw.removeprefix("```json").strip()
-    if raw.endswith("```"):
-        raw = raw.removesuffix("```").strip()
-
+async def gpt_schema_update(schema_name, original_schema, user_message, message_history):
     try:
-        parsed = json.loads(raw)
-        logger.info(f"Parsed schema update: {parsed}")
+        # Create the prompt for GPT to extract schema changes, now including message history
+        context_message = "".join([f"{msg['role']}: {msg['message']}\n" for msg in message_history])
 
-        # Extract token usage
-        token_usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens
-        }
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    f"You are a data assistant. The following is the original {schema_name} schema. "
+                    "The user has provided a message that may contain updates to some fields in the schema.\n\n"
+                    "Your task is to extract ONLY the fields clearly mentioned in the message and return them as a nested object.\n"
+                    "- If a field is mentioned, include it in the result with its new value.\n"
+                    "- If a field is not mentioned, do not include it.\n"
+                    "- If the field is nested (inside another object), return it as a nested object.\n\n"
+                    "Return ONLY the following JSON structure:\n"
+                    '{ \"extracted_fields\": { \"field_name\": value, ... } }\n\n'
+                    "Do not include the entire updated schema. Only include the fields mentioned in the user message.\n"
+                    "Respond ONLY with a JSON object."
+                )
+            },
+            {
+                "role": "user",
+                "content": json.dumps({
+                    "original_schema": original_schema,
+                    "user_message": user_message,
+                    "context_message": context_message
+                }, default=decimal_default)  # Ensure Decimal is serialized correctly
+            }
+        ]
 
-        # Return extracted_fields only, token_usage
-        return parsed.get("extracted_fields", {}), token_usage
+        # Send the request to GPT-4 to extract changes
+        response = await aclient.chat.completions.create(
+            model="gpt-4o",
+            messages=prompt,
+            max_tokens=16384
+        )
 
-    except json.JSONDecodeError:
-        logger.error("GPT response was not valid JSON:\n" + raw)
+        # Clean and parse the response from GPT
+        raw = response.choices[0].message.content.strip()
 
-        # Return empty dict with token usage if available
-        token_usage = {
-            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-            "total_tokens": response.usage.total_tokens if response.usage else 0
-        }
+        # Check and remove any unwanted markdown code fences
+        if raw.startswith("```json"):
+            raw = raw.removeprefix("```json").strip()
+        if raw.endswith("```"):
+            raw = raw.removesuffix("```").strip()
 
-        return {}, token_usage
+        # Debug: Log the raw response for further analysis
+        logger.debug(f"Raw GPT response for {schema_name}: {raw}")
 
-async def gpt_response(message_history, user_message, contexts=None, goal=None, tone_instructions=None, scope="all"):
-    # aclient = client
+        try:
+            # Attempt to parse the cleaned-up response as JSON
+            parsed = json.loads(raw)
+            logger.debug(f"Parsed GPT response for {schema_name}: {parsed}")
 
-    # lead_data, loan_application_model = await get_lead_info(lead_id, loan_id) if lead_id and loan_id else (None, None)
+            # Ensure the changes are properly extracted and returned
+            extracted_fields = parsed.get("extracted_fields", {})
 
+            # If no fields were extracted, return an empty response for this schema
+            if not extracted_fields:
+                logger.info(f"No fields extracted for schema {schema_name}.")
+                return {}, response.usage.to_dict()
+
+            # Validate fields against the schema to ensure only existing fields are included
+            valid_fields = {}
+            for field, value in extracted_fields.items():
+                # Check if the field exists in the original schema
+                if field in original_schema:
+                    valid_fields[field] = value
+                else:
+                    logger.warning(f"Field {field} does not exist in the schema and will be excluded.")
+
+            # Log the valid extracted fields for debugging
+            logger.debug(f"Valid extracted fields: {valid_fields}")
+
+            # Return only the valid changes directly under the schema name
+            return valid_fields, response.usage.to_dict()
+
+        except json.JSONDecodeError:
+            logger.error(f"GPT response was not valid JSON: {raw}")
+            return {}, {}
+
+    except Exception as e:
+        logger.error(f"Error processing schema update for {schema_name}: {e}")
+        return {}, {}
+
+
+async def gpt_response(message_history, user_message, context=None, goal=None, tone_instructions=None, schema_list=None, scope=[]):
     try:
+        # Initialize dictionaries to store schema changes and token usage
+        schema_changes = {}
+        token_usage = {}
 
-        if scope == "all":
-            lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
-            loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
-        elif scope == "lead_info":
-            lead_changes, lead_token_usage = await gpt_schema_update(aclient, "lead", lead_schema or {}, user_message)
-            loan_changes, loan_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
-        elif scope == "loan_info":
-            lead_changes, lead_token_usage = {}, {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
-            loan_changes, loan_token_usage = await gpt_schema_update(aclient, "loan", loan_schema or {}, user_message)
+        # If a schema_list is provided, process each schema in the list
+        if schema_list and isinstance(schema_list, list):
+            if "all" in scope:
+                for schema in schema_list:
+                    schema_name = schema.get("name")  # Assuming each schema has a 'name' field
+                    schema_data = schema.get("data", {})  # Assuming schema data is inside 'data'
 
-        change_log = ""
+                    # Dynamically process each schema type by calling gpt_schema_update
+                    changes, schema_token_usage = await gpt_schema_update(
+                        schema_name,
+                        schema_data,  # Pass schema data for processing
+                        user_message,
+                        message_history,
+                    )
 
-        if contexts and isinstance(contexts, list):
-            context_str = "\n\n".join(contexts)
+                    # Store changes and token usage for each schema, no need to wrap them in schema name again
+                    schema_changes[schema_name] = changes
+                    token_usage[schema_name] = schema_token_usage
+            else:
+                # If scope is not "all", only process the schemas specified in the scope
+                for schema_name in scope:
+                    schema = next((s for s in schema_list if s.get("name") == schema_name), None)
+                    if schema:
+                        schema_data = schema.get("data", {})
+                        changes, schema_token_usage = await gpt_schema_update(
+                            schema_name,
+                            schema_data,
+                            user_message,
+                            message_history,
+                        )
+                        schema_changes[schema_name] = changes
+                        token_usage[schema_name] = schema_token_usage
+
+        # Construct the context note from a list of strings (context is a list of strings)
+        if context and isinstance(context, list):
+            context_str = "\n\n".join(context)
             context_note = (
                 f"\n\nNote: The following relevant information has been supplied as context. "
-                "Use this to better understand the conversation.\n"
+                f"Use this to better understand the conversation:\n"
                 f"{context_str}"
             )
         else:
@@ -223,67 +270,38 @@ async def gpt_response(message_history, user_message, contexts=None, goal=None, 
                 "If the question is unrelated to the topic, politely guide the conversation back on track."
             )
 
-        # Construct final context message
+        # Construct final context message by appending all message history and context note
         context_message = "".join([f"{msg['role']}: {msg['message']}\n" for msg in message_history])
         context_message += context_note
 
-        if change_log:
-            context_message += f"\n\nThe following updates were inferred from the conversation:\n{change_log}"
-
         response = await aclient.beta.chat.completions.parse(
             model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"{tone_instructions or 'Provide clear, professional, and helpful responses in a conversational tone. Ensure accuracy while keeping interactions natural and engaging.'}\n\n"
-
-                        f"The goal of this conversation is: {goal}\n\n"
-
-                        "**Guidelines for Handling Conversations:**\n"
-                        "- **conversation_over** → Use this only if the user clearly states they have no further questions.\n"
-                        "- **human_intervention** → Escalate only if the user asks about scheduling, availability, or if no clear answer is found in the provided context.\n"
-                        "- **continue_conversation** → If the topic allows for further discussion, offer additional insights or ask if the user would like more details.\n"
-                        "- **out_of_scope** → If the user's question is unrelated, acknowledge it politely and redirect the conversation back to relevant topics.\n\n"
-
-                        "**Handling Out-of-Scope Questions:**\n"
-                        "If a user asks something unrelated, respond in a way that maintains a natural flow:\n"
-                        "👤 User: 'What's the best Italian restaurant nearby?'\n"
-                        "💬 Response: 'That sounds like a great topic! While I don't have restaurant recommendations, I'd be happy to assist with [specific topic]. Let me know how I can help!'\n\n"
-
-                        "If the user continues with off-topic questions, acknowledge their curiosity but steer the conversation back in a professional and engaging manner."
-                        "DO NOT USE EMOTICONS OR EMOJIS IN YOUR RESPONSES EVER.\n\n"
-                    )
-                },
-                {"role": "user", "content": context_message}
-            ],
+            messages=[{
+                "role": "system",
+                "content": (
+                    f"{tone_instructions or 'Provide clear, professional, and helpful responses in a conversational tone. Ensure accuracy while keeping interactions natural and engaging.'}\n\n"
+                    f"The goal of this conversation is: {goal}\n\n"
+                    "**Guidelines for Handling Conversations:**\n"
+                    "- **conversation_over** → Use this only if the user clearly states they have no further questions.\n"
+                    "- **human_intervention** → Escalate only if the user asks about scheduling, availability, or if no clear answer is found in the provided context.\n"
+                    "- **continue_conversation** → If the topic allows for further discussion, offer additional insights or ask if the user would like more details.\n"
+                    "- **out_of_scope** → If the user's question is unrelated, acknowledge it politely and redirect the conversation back to relevant topics.\n\n"
+                )
+            },
+            {"role": "user", "content": context_message}],
             response_format=Sentiment,
             max_tokens=16384
         )
 
         parsed_sentiment = response.choices[0].message.parsed
-        token_usage = response.usage.to_dict()
-
-        # If GPT determines the question is off-topic, classify as 'out_of_scope'
         if "I'm not sure" in parsed_sentiment.response or "I can't help with that" in parsed_sentiment.response:
             parsed_sentiment.conversation_status = "out_of_scope"
-
-        total_response_tokens = token_usage.get("total_tokens", 0)
-        total_lead_tokens = lead_token_usage.get("total_tokens", 0)
-        total_loan_tokens = loan_token_usage.get("total_tokens", 0)
 
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
-            "changes": {
-                "lead_schema_data": lead_changes,
-                "loan_schema_data": loan_changes
-            },
-            # "token_usage": {
-            #     "response_tokens": total_response_tokens,
-            #     "lead_schema_tokens": total_lead_tokens,
-            #     "loan_schema_tokens": total_loan_tokens
-            # }
+            "changes": schema_changes,  # Return schema changes from all processed schemas
+            # "token_usage": token_usage  # Return token usage for all schemas
         }
 
     except RateLimitError as e:
@@ -307,23 +325,24 @@ async def message_teli_data():
 
         id = data.get("id")
         message_history = data.get("message_history")
-        # context = data.get("context", [])
         tone = data.get("tone", None)
         goal = data.get("goal", None)
-        scope = data.get("scope", "all")
+        scope = data.get("schema_scope", "all")
 
         if not all([id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
 
         newest_message = message_history[-1]["message"]
         context = context_store.get(id)
+        context_list = context.get("context", None)
+        schema_list = context.get("schema_context", None)
 
         if not context:
             logger.info(f"No context found for id {id}. Using GPT alone.")
             return jsonify({"error": "No context found for the given id"}), 404
 
         logger.info("Using supplied context for GPT response.")
-        gpt_response_data = await gpt_response(message_history, newest_message, context, goal=goal, tone_instructions=tone, scope=scope)
+        gpt_response_data = await gpt_response(message_history, newest_message, context=context_list, goal=goal, tone_instructions=tone, schema_list=schema_list, scope=scope)
 
         # Handle response
         conversation_status = gpt_response_data["conversation_status"]

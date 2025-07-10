@@ -18,10 +18,14 @@ class MessageContext:
             if "Item" in response:
                 item = response["Item"]
                 logging.info(f"Message context for id {id} retrieved successfully.")
-                return item.get("context", [])
+                # Return both context and schema_context
+                return {
+                    "context": item.get("context", []),
+                    "schema_context": item.get("schema_context", [])
+                }
             else:
                 logging.warning(f"No message context found for id {id}.")
-                return []
+                return {"context": [], "schema_context": []}
         except ClientError as e:
             logging.error(f"Failed to retrieve message context for id {id}: {e}")
             raise
@@ -30,7 +34,12 @@ class MessageContext:
         try:
             response = self.table.scan()
             items = response.get("Items", [])
-            contexts = {item["id"]: item.get("context", []) for item in items}
+            contexts = {
+                item["id"]: {
+                    "context": item.get("context", []),
+                    "schema_context": item.get("schema_context", [])
+                } for item in items
+            }
             logging.info("All message contexts retrieved successfully.")
             return contexts
         except ClientError as e:
@@ -45,12 +54,19 @@ class MessageContext:
             logging.error(f"Failed to delete message context for id {id}: {e}")
             raise
 
-    async def update_message_context(self, id, context):
+    async def update_message_context(self, id, context, schema_context):
         try:
-            self.table.put_item(Item={"id": id, "context": context})
-            logging.info(f"Message context for id {id} saved successfully.")
+            # Save both context and schema_context in DynamoDB
+            self.table.put_item(
+                Item={
+                    "id": id,
+                    "context": context,
+                    "schema_context": schema_context
+                }
+            )
+            logging.info(f"Message context and schema_context for id {id} saved successfully.")
         except ClientError as e:
-            logging.error(f"Failed to save message context for id {id}: {e}")
+            logging.error(f"Failed to save message context and schema_context for id {id}: {e}")
             raise
 
     def delete_id(self, id):
