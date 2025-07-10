@@ -22,7 +22,7 @@ quart_app = cors(
 
 
 # Create a Modal App and Network File System
-modal_app = App("bonzo-app")
+modal_app = App("lodasoft-app")
 aclient = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 image = (
@@ -346,7 +346,7 @@ async def message_teli_data():
 # For deployment with Modal
 @modal_app.function(
     image=image,
-    secrets=[Secret.from_name("bonzo-app-secrets")]
+    secrets=[Secret.from_name("lodasoft-app-secrets")]
 )
 @asgi_app()
 def quart_asgi_app():
