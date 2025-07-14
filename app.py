@@ -8,7 +8,7 @@ from aiohttp import ClientSession
 from openai import OpenAIError, RateLimitError, AsyncOpenAI
 from modal import Image, App, Secret, asgi_app
 
-from repository.context import MessageContext
+from repository.context import MessageContextLodasoft
 
 quart_app = Quart(__name__)
 quart_app = cors(
@@ -32,7 +32,7 @@ image = (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-context_store = MessageContext()
+context_store = MessageContextLodasoft()
 
 def get_api_key():
     return os.environ.get("API_KEY")
@@ -54,6 +54,8 @@ async def upload_context():
         data = await request.json
         id = data.get("id")
         context = data.get("context")
+        goal = data.get("goal", None)
+        tone = data.get("tone", None)
         schema_context = data.get("schema_context", [])
 
         # Validation for the required fields
@@ -64,10 +66,10 @@ async def upload_context():
             return jsonify({"error": "Invalid schema_context format. It must be a list of schemas."}), 400
 
         # Save context and schema_context to the database
-        await context_store.update_message_context(id, context, schema_context)
+        await context_store.update_message_context(id, context, goal, tone, schema_context)
 
         logging.info(f"Context uploaded successfully for id {id}.")
-        return jsonify({"message": "Context uploaded successfully.", "id": id, "context": context, "schema_context": schema_context}), 200
+        return jsonify({"message": "Context uploaded successfully.", "id": id, "context": context, "goal": goal, "tone": tone, "schema_context": schema_context}), 200
 
     except Exception as e:
         logging.error(f"Error uploading context: {e}")
@@ -325,8 +327,8 @@ async def message_teli_data():
 
         id = data.get("id")
         message_history = data.get("message_history")
-        tone = data.get("tone", None)
-        goal = data.get("goal", None)
+        # tone = data.get("tone", None)
+        # goal = data.get("goal", None)
         scope = data.get("schema_scope", [])
         print(f"Received scope: {scope}")
 
@@ -335,7 +337,14 @@ async def message_teli_data():
 
         newest_message = message_history[-1]["message"]
         context = context_store.get(id)
+
+        if not context:
+            logger.info(f"No context found for id {id}. Using GPT alone.")
+            return jsonify({"error": "No context found for the given id"}), 404
+
         context_list = context.get("context", None)
+        goal = context.get("goal", None)
+        tone = context.get("tone", None)
         schema_list = context.get("schema_context", None)
 
         if not context:
