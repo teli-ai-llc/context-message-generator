@@ -143,14 +143,19 @@ async def gpt_schema_update(schema_name, original_schema, user_message, message_
                 "content": (
                     f"You are a data assistant. The following is the original {schema_name} schema. "
                     "The user has provided a message that may contain updates to some fields in the schema.\n\n"
-                    "Your task is to extract ONLY the fields clearly mentioned in the message and return them as a nested object.\n"
-                    "- If a field is mentioned, include it in the result with its new value.\n"
-                    "- If a field is not mentioned, do not include it.\n"
-                    "- If the field is nested (inside another object), return it as a nested object.\n\n"
-                    "Return ONLY the following JSON structure:\n"
-                    '{ \"extracted_fields\": { \"field_name\": value, ... } }\n\n'
-                    "Do not include the entire updated schema. Only include the fields mentioned in the user message.\n"
-                    "Respond ONLY with a JSON object."
+                    "Your task is to extract ONLY the fields clearly mentioned in the message and return them in this format:\n\n"
+                    "{\n"
+                    "  \"extracted_fields\": {\n"
+                    "    \"field_name\": {\n"
+                    "      \"value\": <new_value>,\n"
+                    "      \"confidence\": <score from 0.0 to 1.0 based on how confident you are the user meant this>\n"
+                    "    }\n"
+                    "  }\n"
+                    "}\n\n"
+                    "- If a field is mentioned, include it with value and confidence.\n"
+                    "- If not mentioned, do not include it.\n"
+                    "- Use a high confidence (e.g. 0.95+) only if you're certain.\n"
+                    "- Respond ONLY with valid JSON (no markdown or code blocks)."
                 )
             },
             {
@@ -199,7 +204,7 @@ async def gpt_schema_update(schema_name, original_schema, user_message, message_
             valid_fields = {}
             for field, value in extracted_fields.items():
                 # Check if the field exists in the original schema
-                if field in original_schema:
+                if field in original_schema and isinstance(value, dict) and "value" in value and "confidence" in value:
                     valid_fields[field] = value
                 else:
                     logger.warning(f"Field {field} does not exist in the schema and will be excluded.")
