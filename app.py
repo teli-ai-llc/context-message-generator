@@ -170,7 +170,7 @@ async def gpt_schema_update(schema_name, original_schema, user_message, message_
 
         # Send the request to GPT-4 to extract changes
         response = await aclient.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=prompt,
             max_tokens=16384
         )
@@ -222,6 +222,32 @@ async def gpt_schema_update(schema_name, original_schema, user_message, message_
     except Exception as e:
         logger.error(f"Error processing schema update for {schema_name}: {e}")
         return {}, {}
+
+def get_token_price(token_usage: dict) -> dict:
+    PRICING = {
+        "prompt_tokens": 0.005 / 1000,
+        "completion_tokens": 0.015 / 1000
+    }
+
+    token_prices = {}
+    total_price = 0.0
+
+    for section, usage in token_usage.items():
+        section_price = 0.0
+        usage_prices = {}
+        for token_type in ("prompt_tokens", "completion_tokens"):
+            count = usage.get(token_type, 0)
+            cost = count * PRICING[token_type]
+            usage_prices[token_type] = round(cost, 5)
+            section_price += cost
+        usage_prices["section_total"] = round(section_price, 5)
+        token_prices[section] = usage_prices
+        total_price += section_price
+
+    return {
+        "token_price_breakdown": token_prices,
+        "total_token_price": round(total_price, 5)
+    }
 
 
 async def gpt_response(message_history, user_message, context=None, goal=None, tone_instructions=None, schema_list=None, scope=None):
@@ -282,7 +308,7 @@ async def gpt_response(message_history, user_message, context=None, goal=None, t
         context_message += context_note
 
         response = await aclient.beta.chat.completions.parse(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=[{
                 "role": "system",
                 "content": (
@@ -304,11 +330,15 @@ async def gpt_response(message_history, user_message, context=None, goal=None, t
         if "I'm not sure" in parsed_sentiment.response or "I can't help with that" in parsed_sentiment.response:
             parsed_sentiment.conversation_status = "out_of_scope"
 
+        response_tokens = response.usage.to_dict()
+        token_usage["response_tokens"] = response_tokens
+
         return {
             "response": parsed_sentiment.response,
             "conversation_status": parsed_sentiment.conversation_status,  # Tracks 'conversation_over', 'human_intervention', 'continue_conversation', 'out_of_scope'
             "changes": schema_changes,  # Return schema changes from all processed schemas
-            # "token_usage": token_usage  # Return token usage for all schemas
+            "token_usage": token_usage,  # Return token usage for all schemas
+            "total_token_price": round(get_token_price(token_usage).get("total_token_price") * 1.75, 5) # Calculate total token price
         }
 
     except RateLimitError as e:
@@ -335,7 +365,6 @@ async def message_teli_data():
         # tone = data.get("tone", None)
         # goal = data.get("goal", None)
         scope = data.get("schema_scope", [])
-        print(f"Received scope: {scope}")
 
         if not all([id, message_history]):
             return jsonify({"error": "Missing required fields"}), 400
