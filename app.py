@@ -26,6 +26,7 @@ aclient = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 image = (
     Image.debian_slim()
     .pip_install_from_requirements("requirements.txt")
+    .add_local_dir("repository", "/root/repository")
 )
 
 # Set up logging
